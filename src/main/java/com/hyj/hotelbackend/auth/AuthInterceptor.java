@@ -1,11 +1,13 @@
 package com.hyj.hotelbackend.auth;
 
-import com.hyj.hotelbackend.common.ApiExceptions;
-import io.jsonwebtoken.Claims;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.lang.NonNull;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 @Component
@@ -18,10 +20,15 @@ public class AuthInterceptor implements HandlerInterceptor {
     }
 
     @Override
-    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+    public boolean preHandle(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response,
+                             @NonNull Object handler) {
         String path = request.getRequestURI();
         // Public endpoints
         if (path.startsWith("/api/auth/login") || path.startsWith("/api/health")) {
+            return true;
+        }
+        // Allow public browsing of rooms related resources
+        if (HttpMethod.GET.matches(request.getMethod()) && path.startsWith("/api/rooms")) {
             return true;
         }
         // Allow preflight
@@ -30,25 +37,25 @@ public class AuthInterceptor implements HandlerInterceptor {
         }
         String auth = request.getHeader("Authorization");
         if (auth == null || !auth.startsWith("Bearer ")) {
-            throw new ApiExceptions.Unauthorized("缺少或非法的 Authorization 头");
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "缺少或非法的 Authorization 头");
         }
         String token = auth.substring(7);
         try {
-            Claims claims = jwtUtil.parse(token);
-            Long userId = Long.valueOf(claims.getSubject());
-            String username = (String) claims.get("username");
-            String role = (String) claims.get("role");
-            Integer vipLevel = claims.get("vipLevel", Integer.class);
+            JwtUtil.JwtPayload payload = jwtUtil.parse(token);
+            Long userId = Long.valueOf(payload.sub);
+            String username = payload.username;
+            String role = payload.role;
+            Integer vipLevel = payload.vipLevel;
             CurrentUserHolder.set(new AuthUser(userId, username, role, vipLevel));
             return true;
         } catch (Exception e) {
-            throw new ApiExceptions.Unauthorized("Token 无效或已过期");
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Token 无效或已过期");
         }
     }
 
     @Override
-    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
+    public void afterCompletion(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response,
+                                @NonNull Object handler, @Nullable Exception ex) {
         CurrentUserHolder.clear();
     }
 }
-
