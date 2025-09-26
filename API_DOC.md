@@ -6,6 +6,7 @@
 - 必需接口：登录、我的订单分页查询、取消预订
 - 房型可用量查询，预订创建时做时段重叠检查与基础库存校验
 - 新增订单扩展接口：订单详情、管理员订单列表筛选、改期（reschedule）、以及 /api/bookings 下的管理员确认/退房
+- DDL 升级为“酒店-房型-房间”三级结构，保留 `rooms` 视图以兼容现有 API
 
 约定
 - Base URL: /api
@@ -22,56 +23,74 @@
 - 金额: BigDecimal 数值（JSON 数字，示例 299.00），单位 CNY
 
 数据模型
-- Room
+- Hotel
   - id: Long
-  - name: String
-  - type: String
-  - totalCount: Integer
-  - availableCount: Integer
+  - name / address / city / phone
+  - starLevel: Integer
+  - status: 1=营业中, 0=停业
+- RoomType（通过 `rooms` 视图对外暴露，兼容旧字段）
+  - id: Long
+  - hotelId: Long
+  - name: String（展示名称）
+  - type: String（分类标签，如 Deluxe / Suite）
+  - totalCount / availableCount: Integer
   - pricePerNight: number(BigDecimal)
-  - images: String（逗号分隔 URL，来自 `room_images` 视图聚合）
+  - images: String（逗号分隔 URL）
   - description: String
-  - amenities: JSON 数组（如 ["WIFI","电视"]）
+  - amenities: JSON 数组
   - areaSqm: number
   - bedType: String
   - maxGuests: Integer
   - isActive: boolean (0/1)
-  - createdAt / updatedAt: ISO 8601 字符串
+  - createdTime / updatedTime: ISO 8601 字符串
+- Room（物理房间，用于房态与维护）
+  - id: Long
+  - hotelId: Long
+  - roomTypeId: Long
+  - roomNumber: String
+  - floor: Integer
+  - status: 1空房 2已预订 3已入住 4待打扫 5维修中
+  - lastCheckoutTime: String(ISO 8601)
 - Booking
   - id: Long
-  - roomId: Long
-  - userId: Long
+  - hotelId / roomTypeId / roomId / userId
   - startTime / endTime: String(ISO 8601)
   - status: "PENDING" | "CONFIRMED" | "CHECKED_IN" | "CHECKED_OUT" | "CANCELLED" | "REFUNDED"
   - guests: Integer
   - amount: number(BigDecimal)
   - currency: String (默认 "CNY")
-  - contactName / contactPhone: String
-  - remark: String
-  - nights: Integer（虚拟列）
-  - checkIn / checkOut: String（虚拟列，分别等于 start/end）
+  - contactName / contactPhone / remark
   - createdAt / updatedAt: ISO 8601 字符串
 - RoomInventory
   - id: Long
-  - roomId: Long
+  - hotelId / roomTypeId
   - date: Date（yyyy-MM-dd）
   - availableCount: Integer
   - price: number(BigDecimal)
   - status: "OPEN" | "CLOSED"
-  - createdAt / updatedAt
+- RoomPriceStrategy
+  - id: Long
+  - hotelId / roomTypeId
+  - strategyType: 1日期加价 2会员折扣 3连住优惠
+  - startDate / endDate: Date
+  - priceAdjust: number(BigDecimal)
+  - discountRate: number (0-1)
+  - minStayDays: Integer
+- RoomMaintenance
+  - id: Long
+  - roomId: Long
+  - maintenanceType / description
+  - startTime / endTime
+  - operator
+  - status: 1处理中 2已完成
 - Payment
   - id: Long
   - bookingId: Long
   - payMethod: "WECHAT" | "ALIPAY" | "CARD" | "CASH"
-  - amount: number(BigDecimal)
-  - currency: String
-  - status: "INIT" | "SUCCESS" | "FAILED" | "REFUNDED"
-  - transactionNo: String
-  - paidAt: String(ISO 8601)
-  - createdAt / updatedAt
+  - amount / currency / status / transactionNo / paidAt
 - Review
   - id: Long
-  - bookingId / roomId / userId: Long
+  - bookingId / hotelId / roomTypeId / userId
   - rating: Integer (1-5)
   - content: String
   - createdAt: ISO 8601 字符串
@@ -82,12 +101,14 @@
   - vipLevel: Integer
 
 数据库结构补充
-- `room_images`：管理房型多图资源，`images` 字段通过 GROUP_CONCAT 聚合写回 `rooms`
-- `room_inventory`：提前 30 天初始化每日可售库存与价格，可用于未来扩展日历库存
-- `bookings`：含虚拟列 `nights`、`check_in`、`check_out`，默认状态 `PENDING`
-- `payments`：记录订单支付信息（当前无公开 API）
-- `reviews`：用户评价数据（当前无公开 API）
-- 初始化脚本创建了 5 个用户（含 1 个管理员）、8 个房型、多张房型图片、示例订单/支付/评价，并回填可用库存
+- `hotel`：支持多门店场景；`room_type`、`room`、`bookings`、`reviews` 等均带 `hotel_id`
+- `room_type`：承载房型聚合信息；通过 updatable 视图 `rooms` 对外暴露以兼容既有 API
+- `room`：记录物理房间及房态，便于入住规划、保洁与维护
+- `room_price_strategy`：配置节假日加价、会员折扣、连住优惠等策略
+- `room_inventory`：以房型维度预加载未来 30 天库存与价格，供房态/预订查询
+- `room_maintenance`：追踪维修、保养工单
+- `payments` / `reviews`：保持与旧版本一致，新增 hotel / roomType 维度
+- 初始化脚本创建 2 家酒店、6 个房型、实房房间号、30 天库存、价格策略、维护/订单/支付/评价示例数据
 
 一、认证与用户（Auth & Users）
 1) 登录
@@ -230,6 +251,7 @@
 - 创建预订（含重叠校验）: POST /api/rooms/{id}/book → 已实现
 - 房型可用量: GET /api/rooms/{id}/availability → 已实现
 - 统一错误体与状态码 → 已实现
+- 多酒店 DDL 升级：`hotel`-`room_type`-`room` 架构、价格策略、维护等表已落地，并通过 `rooms` 视图兼容旧接口
 
 示例（Windows cmd.exe 使用 curl）
 1) 订单详情
