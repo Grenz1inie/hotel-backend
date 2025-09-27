@@ -7,7 +7,7 @@ import lombok.Data;
 import java.math.BigDecimal;
 
 @Data
-@TableName("rooms")
+@TableName("room_type")
 public class Room {
     @TableId
     private Long id;
@@ -18,4 +18,10 @@ public class Room {
     private BigDecimal pricePerNight;
     private String images; // comma separated URLs
     private String description;
+    private String amenities;
+    private BigDecimal areaSqm;
+    private String bedType;
+    private Integer maxGuests;
+    private Integer isActive;
+    private Long hotelId;
 }

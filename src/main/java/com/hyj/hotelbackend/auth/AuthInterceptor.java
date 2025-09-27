@@ -28,7 +28,7 @@ public class AuthInterceptor implements HandlerInterceptor {
             return true;
         }
         // Allow public browsing of rooms related resources
-        if (HttpMethod.GET.matches(request.getMethod()) && path.startsWith("/api/rooms")) {
+        if (HttpMethod.GET.matches(request.getMethod()) && (path.startsWith("/api/rooms") || path.startsWith("/api/hotel"))) {
             return true;
         }
         // Allow preflight

@@ -60,6 +60,11 @@ public class RoomController {
     @PostMapping("/{id}/book")
     public Booking book(@PathVariable Long id,
                         @RequestParam(required = false) Long userId,
+                        @RequestParam(required = false) Long hotelId,
+                        @RequestParam(required = false) Integer guests,
+                        @RequestParam(required = false) String contactName,
+                        @RequestParam(required = false) String contactPhone,
+                        @RequestParam(required = false) String remark,
                         @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime start,
                         @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end) {
         AuthUser me = CurrentUserHolder.get();
@@ -76,6 +81,16 @@ public class RoomController {
         if (!start.isBefore(end)) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "开始时间必须早于结束时间");
         Room r = roomService.getById(id);
         if (r == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在");
+        Long resolvedHotelId = r.getHotelId();
+        if (hotelId != null && resolvedHotelId != null && !Objects.equals(hotelId, resolvedHotelId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "酒店信息不匹配");
+        }
+        if (resolvedHotelId == null) {
+            resolvedHotelId = hotelId;
+        }
+        if (resolvedHotelId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "无法确定酒店信息");
+        }
         // check inventory by overlapping bookings
         long overlapping = bookingService.count(new LambdaQueryWrapper<Booking>()
                 .eq(Booking::getRoomId, id)
@@ -91,14 +106,28 @@ public class RoomController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "暂无可用房间");
         }
         Booking b = new Booking();
+        b.setHotelId(resolvedHotelId);
+        b.setRoomTypeId(r.getId());
         b.setRoomId(id);
         b.setUserId(actualUserId);
         b.setStartTime(start);
         b.setEndTime(end);
         b.setStatus("PENDING");
+        int guestCount = guests != null && guests > 0 ? guests : 1;
+        b.setGuests(guestCount);
         long days = java.time.Duration.between(start.toLocalDate().atStartOfDay(), end.toLocalDate().atStartOfDay()).toDays();
         if (days <= 0) days = 1;
         b.setAmount(r.getPricePerNight().multiply(java.math.BigDecimal.valueOf(days)));
+        b.setCurrency("CNY");
+        if (contactName != null) {
+            b.setContactName(contactName.trim());
+        }
+        if (contactPhone != null) {
+            b.setContactPhone(contactPhone.trim());
+        }
+        if (remark != null) {
+            b.setRemark(remark.trim());
+        }
         bookingService.save(b);
         // decrement availableCount (simplified, not handling overlapping bookings)
         r.setAvailableCount(Math.max(0, r.getAvailableCount() - 1));

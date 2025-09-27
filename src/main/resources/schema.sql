@@ -3,12 +3,8 @@
 
 SET FOREIGN_KEY_CHECKS = 0;
 
-DROP VIEW IF EXISTS rooms;
-DROP TABLE IF EXISTS reviews;
-DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS bookings;
 DROP TABLE IF EXISTS room_maintenance;
-DROP TABLE IF EXISTS room_inventory;
 DROP TABLE IF EXISTS room_price_strategy;
 DROP TABLE IF EXISTS room_images;
 DROP TABLE IF EXISTS room;
@@ -21,15 +17,18 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- 酒店基础信息表
 CREATE TABLE hotel
 (
-    id            BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '酒店ID',
-    name          VARCHAR(100)                NOT NULL COMMENT '酒店名称',
-    address       VARCHAR(255)                NOT NULL COMMENT '酒店地址',
-    city          VARCHAR(50)                 NOT NULL COMMENT '所在城市',
-    phone         VARCHAR(20)                 NOT NULL COMMENT '联系电话',
-    star_level    TINYINT      DEFAULT 0      NOT NULL COMMENT '星级（0=未评级）',
-    status        TINYINT      DEFAULT 1      NOT NULL COMMENT '状态（1=营业中，0=停业）',
-    created_time  DATETIME     DEFAULT CURRENT_TIMESTAMP                    NOT NULL,
-    updated_time  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
+    id              BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '酒店ID',
+    name            VARCHAR(100)                NOT NULL COMMENT '酒店名称',
+    address         VARCHAR(255)                NOT NULL COMMENT '酒店地址',
+    city            VARCHAR(50)                 NOT NULL COMMENT '所在城市',
+    phone           VARCHAR(20)                 NOT NULL COMMENT '联系电话',
+    star_level      TINYINT      DEFAULT 0      NOT NULL COMMENT '星级（0=未评级）',
+    status          TINYINT      DEFAULT 1      NOT NULL COMMENT '状态（1=营业中，0=停业）',
+    introduction    TEXT                        NOT NULL COMMENT '酒店介绍',
+    hero_image_url  VARCHAR(500)                NOT NULL COMMENT '首页大图 URL',
+    gallery_images  TEXT                        NULL COMMENT '首页轮播或图库图片，逗号分隔 URL',
+    created_time    DATETIME     DEFAULT CURRENT_TIMESTAMP                    NOT NULL,
+    updated_time    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT uq_hotel_name UNIQUE (name),
     KEY idx_city (city)
 ) ENGINE = InnoDB
@@ -121,27 +120,6 @@ CREATE TABLE room_images
   COLLATE = utf8mb4_general_ci
   COMMENT ='房型图片';
 
--- 房型每日库存与售价信息
-CREATE TABLE room_inventory
-(
-    id              BIGINT PRIMARY KEY AUTO_INCREMENT,
-    hotel_id        BIGINT                 NOT NULL,
-    room_type_id    BIGINT                 NOT NULL,
-    date            DATE                   NOT NULL,
-    available_count INT                    NOT NULL,
-    price           DECIMAL(10, 2)         NOT NULL,
-    status          ENUM ('OPEN','CLOSED') NOT NULL DEFAULT 'OPEN',
-    created_at      TIMESTAMP              NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP              NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_inventory (room_type_id, date),
-    KEY idx_inventory_hotel (hotel_id, date),
-    CONSTRAINT fk_inventory_room_type FOREIGN KEY (room_type_id) REFERENCES room_type (id) ON DELETE CASCADE,
-    CONSTRAINT fk_inventory_hotel FOREIGN KEY (hotel_id) REFERENCES hotel (id) ON DELETE CASCADE
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_general_ci
-  COMMENT ='房型每日库存';
-
 -- 动态价格策略
 CREATE TABLE room_price_strategy
 (
@@ -218,109 +196,98 @@ CREATE TABLE bookings
   COLLATE = utf8mb4_general_ci
   COMMENT ='订单表';
 
--- 支付记录
-CREATE TABLE payments
-(
-    id             BIGINT PRIMARY KEY AUTO_INCREMENT,
-    booking_id     BIGINT                                      NOT NULL,
-    pay_method     ENUM ('WECHAT','ALIPAY','CARD','CASH')      NOT NULL,
-    amount         DECIMAL(10, 2)                              NOT NULL,
-    currency       CHAR(3)                                     NOT NULL DEFAULT 'CNY',
-    status         ENUM ('INIT','SUCCESS','FAILED','REFUNDED') NOT NULL DEFAULT 'INIT',
-    transaction_no VARCHAR(128),
-    paid_at        DATETIME,
-    created_at     TIMESTAMP                                   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at     TIMESTAMP                                   NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_payments_booking (booking_id),
-    CONSTRAINT fk_payments_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_general_ci
-  COMMENT ='支付记录';
-
--- 评价
-CREATE TABLE reviews
-(
-    id         BIGINT PRIMARY KEY AUTO_INCREMENT,
-    booking_id BIGINT    NOT NULL,
-    hotel_id   BIGINT    NOT NULL,
-    room_type_id BIGINT  NOT NULL,
-    user_id    BIGINT    NOT NULL,
-    rating     TINYINT   NOT NULL CHECK (rating BETWEEN 1 AND 5),
-    content    TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_reviews_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE,
-    CONSTRAINT fk_reviews_hotel FOREIGN KEY (hotel_id) REFERENCES hotel (id) ON DELETE CASCADE,
-    CONSTRAINT fk_reviews_room_type FOREIGN KEY (room_type_id) REFERENCES room_type (id) ON DELETE CASCADE,
-    CONSTRAINT fk_reviews_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-    KEY idx_reviews_room_type (room_type_id),
-    KEY idx_reviews_user (user_id)
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_general_ci
-  COMMENT ='评价表';
-
--- 兼容旧代码：创建 updatable view rooms
-CREATE OR REPLACE VIEW rooms AS
-SELECT
-    rt.id               AS id,
-    rt.name             AS name,
-    rt.type             AS type,
-    rt.total_count      AS totalCount,
-    rt.available_count  AS availableCount,
-    rt.price_per_night  AS pricePerNight,
-    rt.images           AS images,
-    rt.description      AS description,
-    rt.amenities        AS amenities,
-    rt.area_sqm         AS areaSqm,
-    rt.bed_type         AS bedType,
-    rt.max_guests       AS maxGuests,
-    rt.is_active        AS isActive,
-    rt.hotel_id         AS hotelId
-FROM room_type rt;
-
 -- -----------------------------------------------------------------------------
 -- 初始化数据
 -- -----------------------------------------------------------------------------
 
-INSERT INTO hotel (name, address, city, phone, star_level, status)
-VALUES ('星河国际酒店', '北京市朝阳区建国路99号', '北京', '010-88886666', 5, 1),
-       ('海天假日酒店', '上海市浦东新区滨江大道68号', '上海', '021-66668888', 4, 1);
+INSERT INTO hotel (name, address, city, phone, star_level, status, introduction, hero_image_url, gallery_images)
+VALUES
+    (
+        '星河国际酒店',
+        '北京市朝阳区建国路99号',
+        '北京',
+        '010-88886666',
+        5,
+        1,
+        '星河国际酒店位于国贸核心CBD，拥有双塔地标建筑与330间摩登客房，为商务人士与高端旅客打造“住在城市云端”的体验。酒店引入数智化前台、24小时行政酒廊、跨界艺术展以及京味与法餐融合的餐饮场景，提供一站式会务与社交服务。',
+        'https://img1.baidu.com/it/u=2202578352,4211113186&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800',
+        'https://img0.baidu.com/it/u=1020359245,3310709019&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800,https://img2.baidu.com/it/u=1851415508,1133451939&fm=253&fmt=auto&app=120&f=JPEG?w=1200&h=800'
+    ),
+    (
+        '海天假日酒店',
+        '上海市浦东新区滨江大道68号',
+        '上海',
+        '021-66668888',
+        4,
+        1,
+        '海天假日酒店临江而建，以“在城市中心度假”为理念，打造观景阳台客房、儿童探险乐园与江景无边泳池。酒店引入空气净化、智能语音客控与亲子烘焙课堂，贴合都市家庭与情侣的周末度假需求。',
+        'https://img2.baidu.com/it/u=3818620205,2664607642&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800',
+        'https://img2.baidu.com/it/u=1334529020,2386571045&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800,https://img0.baidu.com/it/u=2929633341,2484616699&fm=253&fmt=auto&app=120&f=JPEG?w=1200&h=800'
+    ),
+    (
+        '云栖温泉度假村',
+        '四川省成都市都江堰市青城山路18号',
+        '成都',
+        '028-86668888',
+        5,
+        1,
+        '云栖温泉度假村依青城山而建，拥抱原生林地与天然温泉，提供独栋木屋、露天泡池与瑜伽禅修课堂。度假村以“返璞归真”的生活方式为灵感，引入农场到餐桌的有机餐饮、亲子自然课堂与星空露营，为城市旅客带来深度疗愈体验。',
+        'https://img1.baidu.com/it/u=1259339772,1482690311&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800',
+        'https://img0.baidu.com/it/u=1850762737,3506694491&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800,https://img1.baidu.com/it/u=1807616836,2499661003&fm=253&fmt=auto&app=138&f=JPEG?w=1200&h=800'
+    );
 
 INSERT INTO users (username, password, role, vip_level, phone, email)
-VALUES ('admin', 'adminpass', 'ADMIN', 0, '13900000000', 'admin@example.com'),
-       ('alice', 'alicepwd', 'USER', 1, '13800000001', 'alice@example.com'),
-       ('bob', 'bobpwd', 'USER', 0, '13800000002', 'bob@example.com'),
-       ('charlie', 'charliepwd', 'USER', 2, '13800000003', 'charlie@example.com'),
-       ('diana', 'dianapwd', 'USER', 1, '13800000004', 'diana@example.com');
+VALUES
+    ('admin', 'adminpass', 'ADMIN', 0, '13900000000', 'admin@example.com'),
+    ('frontdesk', 'frontdesk', 'ADMIN', 0, '13900000001', 'frontdesk@hotel.com'),
+    ('alice', 'alicepwd', 'USER', 1, '13800000001', 'alice@example.com'),
+    ('bob', 'bobpwd', 'USER', 0, '13800000002', 'bob@example.com'),
+    ('charlie', 'charliepwd', 'USER', 2, '13800000003', 'charlie@example.com'),
+    ('diana', 'dianapwd', 'USER', 1, '13800000004', 'diana@example.com'),
+    ('leo', 'leopwd', 'USER', 3, '13700000005', 'leo@example.com'),
+    ('mia', 'miapwd', 'USER', 2, '13700000006', 'mia@example.com');
 
 -- 房型数据
 INSERT INTO room_type (hotel_id, name, type, description, price_per_night, total_count, available_count, images, amenities, area_sqm, bed_type, max_guests)
 VALUES
-    (1, '豪华大床房', 'Deluxe', '带落地窗，含早餐', 528.00, 12, 12, NULL, JSON_ARRAY('WIFI','电视','窗景','浴缸','早餐'), 32.0, 'King', 2),
-    (1, '行政套房', 'Suite', '宽敞，配备商务书桌', 1088.00, 6, 6, NULL, JSON_ARRAY('WIFI','电视','浴缸','行政礼遇'), 55.0, 'King', 3),
-    (1, '标准双床房', 'Standard', '干净舒适，性价比高', 388.00, 20, 20, NULL, JSON_ARRAY('WIFI','电视','淋浴'), 26.0, 'Twin', 2),
-    (2, '海景大床房', 'SeaView', '面朝大海，观景阳台', 798.00, 8, 8, NULL, JSON_ARRAY('WIFI','电视','阳台','咖啡机'), 35.0, 'King', 2),
-    (2, '家庭房', 'Family', '适合家庭出行，含儿童设施', 688.00, 10, 10, NULL, JSON_ARRAY('WIFI','电视','婴儿床可选'), 40.0, 'Queen+Single', 4),
-    (2, '商务大床房', 'Business', '商务书桌，阅读灯', 498.00, 15, 15, NULL, JSON_ARRAY('WIFI','电视','书桌','咖啡机'), 30.0, 'Queen', 2);
+    (1, '星河行政大床房', 'Executive', '落地窗景观，含行政酒廊礼遇与次日双人早餐', 568.00, 18, 16, NULL, JSON_ARRAY('WIFI','55寸电视','空气净化','浴缸','行政酒廊'), 35.0, 'King', 2),
+    (1, '星河家庭套房', 'FamilySuite', '双卧设计，客厅配备儿童帐篷与游戏角', 1188.00, 8, 8, NULL, JSON_ARRAY('WIFI','洗衣烘干一体机','咖啡机','儿童玩具','浴缸'), 68.0, 'King+Twin', 4),
+    (1, '星河城市景观房', 'CityView', '高层城市景观房型，附赠欢迎水果与晚安甜品', 468.00, 24, 20, NULL, JSON_ARRAY('WIFI','蓝牙音响','迷你吧','浴袍','智能语音'), 30.0, 'Queen', 2),
+    (2, '海天无边海景房', 'SeaPremium', '观景阳台，可直接眺望黄浦江夜景', 828.00, 12, 10, NULL, JSON_ARRAY('WIFI','阳台躺椅','胶囊咖啡','浴缸','智能窗帘'), 36.0, 'King', 2),
+    (2, '海天亲子乐园房', 'FamilyTheme', '亲子主题装饰，提供儿童滑梯、绘本与加湿器', 688.00, 14, 12, NULL, JSON_ARRAY('WIFI','儿童滑梯','绘本角','空气加湿','浴袍'), 42.0, 'Queen+Single', 4),
+    (2, '海天尊享套房', 'SkySuite', '双层挑空客厅并配私人管家服务', 1368.00, 5, 5, NULL, JSON_ARRAY('WIFI','私人管家','影音室','梳妆台','浴缸'), 92.0, 'King', 3),
+    (3, '云栖温泉大床房', 'HotSpring', '客房自带私汤泡池，含欢迎水果与晨间瑜伽', 998.00, 10, 9, NULL, JSON_ARRAY('WIFI','私汤泡池','壁炉','空净系统','瑜伽垫'), 48.0, 'King', 2),
+    (3, '云栖森林木屋', 'Chalet', '独栋木屋，露台可观星，适合亲友小聚', 1288.00, 6, 6, NULL, JSON_ARRAY('WIFI','露台壁炉','厨房','投影仪','咖啡机'), 75.0, 'King+Sofa', 4),
+    (3, '云栖禅意套房', 'ZenSuite', '榻榻米起居室与茶道体验角，含双人禅修课程', 1588.00, 4, 4, NULL, JSON_ARRAY('WIFI','香薰加湿','茶道角','冥想垫','BOSE音响'), 85.0, 'Tatami', 3);
 
 -- 房型图片（示例）
 INSERT INTO room_images (room_type_id, url, is_primary, sort_order)
 SELECT rt.id,
        urls.url,
-       urls.is_primary,
-       urls.sort_order
+        urls.is_primary,
+        urls.sort_order
 FROM room_type rt
          JOIN (
-    SELECT 1 AS seq, '豪华大床房' AS name, 'https://images.unsplash.com/photo-1505691938895-1758d7feb511?auto=format&fit=crop&w=1200&q=80' AS url, 1 AS is_primary, 1 AS sort_order
-    UNION ALL SELECT 2, '豪华大床房', 'https://images.unsplash.com/photo-1505691723518-36a5ac3b2a59?auto=format&fit=crop&w=1200&q=80', 0, 2
-    UNION ALL SELECT 3, '豪华大床房', 'https://images.unsplash.com/photo-1501117716987-c8e1ecb2108b?auto=format&fit=crop&w=1200&q=80', 0, 3
-    UNION ALL SELECT 4, '标准双床房', 'https://images.unsplash.com/photo-1542314831-068cd1dbfeeb?auto=format&fit=crop&w=1200&q=80', 1, 1
-    UNION ALL SELECT 5, '标准双床房', 'https://images.unsplash.com/photo-1554995207-c18c203602cb?auto=format&fit=crop&w=1200&q=80', 0, 2
-    UNION ALL SELECT 6, '海景大床房', 'https://images.unsplash.com/photo-1505692256278-3f4f5566f30a?auto=format&fit=crop&w=1200&q=80', 1, 1
-    UNION ALL SELECT 7, '海景大床房', 'https://images.unsplash.com/photo-1519710164239-da123dc03ef4?auto=format&fit=crop&w=1200&q=80', 0, 2
-    UNION ALL SELECT 8, '家庭房', 'https://images.unsplash.com/photo-1551776235-dde6d4829804?auto=format&fit=crop&w=1200&q=80', 1, 1
-    UNION ALL SELECT 9, '商务大床房', 'https://images.unsplash.com/photo-1505692794403-34d4982f88aa?auto=format&fit=crop&w=1200&q=80', 1, 1
+    SELECT 1 AS seq, '星河行政大床房' AS name, 'https://img2.baidu.com/it/u=2717392221,2036429084&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640' AS url, 1 AS is_primary, 1 AS sort_order
+    UNION ALL SELECT 2, '星河行政大床房', 'https://img0.baidu.com/it/u=1792563419,269329296&fm=253&fmt=auto&app=120&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 3, '星河行政大床房', 'https://img1.baidu.com/it/u=3262019180,1633675619&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 3
+    UNION ALL SELECT 4, '星河家庭套房', 'https://img2.baidu.com/it/u=3662656664,1953274148&fm=253&fmt=auto&app=120&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 5, '星河家庭套房', 'https://img0.baidu.com/it/u=1906558406,2171002623&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 6, '星河家庭套房', 'https://img2.baidu.com/it/u=1544049482,1809894736&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 3
+    UNION ALL SELECT 7, '星河城市景观房', 'https://img2.baidu.com/it/u=3342613848,4214983380&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 8, '星河城市景观房', 'https://img1.baidu.com/it/u=3952585099,2012500344&fm=253&fmt=auto&app=120&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 9, '海天无边海景房', 'https://img1.baidu.com/it/u=1491246605,622270175&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 10, '海天无边海景房', 'https://img0.baidu.com/it/u=3984708947,3695996903&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 11, '海天亲子乐园房', 'https://img2.baidu.com/it/u=2535877087,1383207265&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 12, '海天亲子乐园房', 'https://img1.baidu.com/it/u=2463380109,1655119478&fm=253&fmt=auto&app=120&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 13, '海天尊享套房', 'https://img0.baidu.com/it/u=2880761726,1979251801&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 14, '海天尊享套房', 'https://img1.baidu.com/it/u=1203171312,4246151695&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 15, '云栖温泉大床房', 'https://img2.baidu.com/it/u=1474517273,2444223609&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 16, '云栖温泉大床房', 'https://img0.baidu.com/it/u=1012507066,1955190941&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 17, '云栖森林木屋', 'https://img0.baidu.com/it/u=4038376211,3216463255&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 18, '云栖森林木屋', 'https://img1.baidu.com/it/u=1665264888,1971330078&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 0, 2
+    UNION ALL SELECT 19, '云栖禅意套房', 'https://img1.baidu.com/it/u=1195753135,1404542232&fm=253&fmt=auto&app=138&f=JPEG?w=960&h=640', 1, 1
+    UNION ALL SELECT 20, '云栖禅意套房', 'https://img1.baidu.com/it/u=4012151582,2148876534&fm=253&fmt=auto&app=120&f=JPEG?w=960&h=640', 0, 2
 ) urls ON urls.name = rt.name;
 
 -- 将多图聚合回房型表 images 字段
@@ -338,11 +305,14 @@ SET SESSION group_concat_max_len = @old_len;
 INSERT INTO room (hotel_id, room_type_id, room_number, floor, status)
 SELECT rt.hotel_id,
        rt.id,
-       CONCAT(LPAD(floor_num, 2, '0'), LPAD(seq, 2, '0')) AS room_number,
-       floor_num,
+       CONCAT(CHAR(64 + rt.type_rank), LPAD(floors.floor_num, 2, '0'), LPAD(seqs.seq, 2, '0')) AS room_number,
+       floors.floor_num,
        1 AS status
 FROM (
-         SELECT id, hotel_id, total_count
+         SELECT id,
+                hotel_id,
+                total_count,
+                ROW_NUMBER() OVER (PARTITION BY hotel_id ORDER BY id) AS type_rank
          FROM room_type
      ) rt
          JOIN (
@@ -356,54 +326,61 @@ FROM (
 ) seqs
 WHERE (floors.floor_num - 1) * 10 + seqs.seq <= rt.total_count;
 
--- 初始化每日库存（未来 30 天）
-INSERT INTO room_inventory (hotel_id, room_type_id, date, available_count, price, status)
-SELECT rt.hotel_id,
-       rt.id,
-       CURDATE() + INTERVAL d.n DAY,
-       rt.total_count,
-       rt.price_per_night,
-       'OPEN'
-FROM room_type rt
-         JOIN (
-    SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7
-    UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15
-    UNION ALL SELECT 16 UNION ALL SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19 UNION ALL SELECT 20 UNION ALL SELECT 21 UNION ALL SELECT 22 UNION ALL SELECT 23
-    UNION ALL SELECT 24 UNION ALL SELECT 25 UNION ALL SELECT 26 UNION ALL SELECT 27 UNION ALL SELECT 28 UNION ALL SELECT 29
-) d;
-
 -- 示例价格策略
 INSERT INTO room_price_strategy (hotel_id, room_type_id, strategy_type, start_date, end_date, price_adjust, discount_rate, min_stay_days)
 VALUES
-    (1, (SELECT id FROM room_type WHERE name = '豪华大床房' LIMIT 1), 1, CURDATE() + INTERVAL 5 DAY, CURDATE() + INTERVAL 7 DAY, 200.00, NULL, 1),
-    (1, (SELECT id FROM room_type WHERE name = '标准双床房' LIMIT 1), 2, CURDATE(), CURDATE() + INTERVAL 30 DAY, NULL, 0.90, 1),
-    (2, (SELECT id FROM room_type WHERE name = '海景大床房' LIMIT 1), 3, CURDATE() + INTERVAL 10 DAY, CURDATE() + INTERVAL 40 DAY, NULL, 0.85, 3);
+    (1, (SELECT id FROM room_type WHERE name = '星河城市景观房' LIMIT 1), 2, CURDATE(), CURDATE() + INTERVAL 30 DAY, NULL, 0.92, 1),
+    (1, (SELECT id FROM room_type WHERE name = '星河行政大床房' LIMIT 1), 1, CURDATE() + INTERVAL 5 DAY, CURDATE() + INTERVAL 12 DAY, 180.00, NULL, 1),
+    (2, (SELECT id FROM room_type WHERE name = '海天亲子乐园房' LIMIT 1), 3, CURDATE() + INTERVAL 14 DAY, CURDATE() + INTERVAL 45 DAY, NULL, 0.88, 2),
+    (3, (SELECT id FROM room_type WHERE name = '云栖温泉大床房' LIMIT 1), 1, CURDATE() + INTERVAL 20 DAY, CURDATE() + INTERVAL 35 DAY, -120.00, NULL, 1);
 
 -- 示例维护记录
 INSERT INTO room_maintenance (room_id, maintenance_type, description, start_time, end_time, operator, status)
-VALUES (
-            (SELECT id FROM room WHERE room_number = '0501' AND hotel_id = 1 LIMIT 1),
-            '空调维修',
-            '空调制冷异常，需更换滤网',
-            NOW() - INTERVAL 1 DAY,
-            NULL,
-            '张维修',
-            1
-       );
+VALUES
+    (
+        (
+            SELECT id
+            FROM room
+            WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1)
+            ORDER BY room_number
+            LIMIT 1 OFFSET 4
+        ),
+        '空调维修',
+        '感应温度异常，已联系供应商更换传感器',
+        NOW() - INTERVAL 1 DAY,
+        NULL,
+        '张维修',
+        1
+    ),
+    (
+        (
+            SELECT id
+            FROM room
+            WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1)
+            ORDER BY room_number
+            LIMIT 1 OFFSET 1
+        ),
+        '地毯清洁',
+        '亲子主题房地毯留有巧克力污渍，需深度清洁',
+        NOW() - INTERVAL 3 DAY,
+        NOW() - INTERVAL 2 DAY,
+        '李保洁',
+        2
+    );
 
 -- 示例订单
 INSERT INTO bookings (hotel_id, room_type_id, room_id, user_id, start_time, end_time, status, guests, amount, currency, contact_name, contact_phone, remark)
 VALUES
     (
         1,
-        (SELECT id FROM room_type WHERE name = '豪华大床房' AND hotel_id = 1 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '豪华大床房' AND hotel_id = 1 LIMIT 1) LIMIT 1),
+        (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) LIMIT 1),
         (SELECT id FROM users WHERE username = 'alice'),
         CURDATE() + INTERVAL 3 DAY + INTERVAL 15 HOUR,
         CURDATE() + INTERVAL 5 DAY + INTERVAL 12 HOUR,
         'CONFIRMED',
         2,
-        1056.00,
+        1136.00,
         'CNY',
         'Alice',
         '13800000001',
@@ -411,65 +388,62 @@ VALUES
     ),
     (
         2,
-        (SELECT id FROM room_type WHERE name = '海景大床房' AND hotel_id = 2 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海景大床房' AND hotel_id = 2 LIMIT 1) LIMIT 1),
+        (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) LIMIT 1),
+        (SELECT id FROM users WHERE username = 'diana'),
+        CURDATE() + INTERVAL 10 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 13 DAY + INTERVAL 12 HOUR,
+        'PENDING',
+        3,
+        2064.00,
+        'CNY',
+        'Diana',
+        '13800000004',
+        '需要儿童床护栏'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) LIMIT 1 OFFSET 2),
         (SELECT id FROM users WHERE username = 'charlie'),
         CURDATE() - INTERVAL 1 DAY + INTERVAL 15 HOUR,
         CURDATE() + INTERVAL 1 DAY + INTERVAL 12 HOUR,
         'CHECKED_IN',
         2,
-        1596.00,
+        1656.00,
         'CNY',
         'Charlie',
         '13800000003',
-        '海景房高层'
+        '安排延迟退房'
     ),
     (
-        1,
-        (SELECT id FROM room_type WHERE name = '标准双床房' AND hotel_id = 1 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '标准双床房' AND hotel_id = 1 LIMIT 1) LIMIT 1 OFFSET 2),
-        (SELECT id FROM users WHERE username = 'bob'),
-        CURDATE() + INTERVAL 7 DAY + INTERVAL 15 HOUR,
-        CURDATE() + INTERVAL 9 DAY + INTERVAL 12 HOUR,
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) LIMIT 1),
+        (SELECT id FROM users WHERE username = 'leo'),
+        CURDATE() + INTERVAL 20 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 23 DAY + INTERVAL 12 HOUR,
         'PENDING',
         2,
-        776.00,
+        2994.00,
         'CNY',
-        'Bob',
-        '13800000002',
-        '靠近电梯'
+        'Leo',
+        '13700000005',
+        '预订禅修课程'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) LIMIT 1 OFFSET 1),
+        (SELECT id FROM users WHERE username = 'mia'),
+        CURDATE() + INTERVAL 2 DAY + INTERVAL 14 HOUR,
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 11 HOUR,
+        'CONFIRMED',
+        4,
+        3864.00,
+        'CNY',
+        'Mia',
+        '13700000006',
+        '需安排烧烤食材'
     );
 
--- 对已完成/已入住订单创建支付记录
-INSERT INTO payments (booking_id, pay_method, amount, currency, status, transaction_no, paid_at)
-SELECT b.id,
-       'ALIPAY',
-       b.amount,
-       b.currency,
-       'SUCCESS',
-       CONCAT('ALI', b.id, UNIX_TIMESTAMP()),
-       NOW()
-FROM bookings b
-WHERE b.status IN ('CONFIRMED', 'CHECKED_IN');
-
--- 示例评价
-INSERT INTO reviews (booking_id, hotel_id, room_type_id, user_id, rating, content)
-SELECT b.id,
-       b.hotel_id,
-       b.room_type_id,
-       b.user_id,
-       5,
-       '房间整洁，景色很好，会再来！'
-FROM bookings b
-WHERE b.status = 'CHECKED_IN'
-LIMIT 1;
-
--- 根据未来一周库存同步房型可用数
-UPDATE room_type rt
-    JOIN (
-        SELECT room_type_id, MIN(available_count) AS min_avail
-        FROM room_inventory
-        WHERE date BETWEEN CURDATE() AND CURDATE() + INTERVAL 6 DAY
-        GROUP BY room_type_id
-    ) inv ON inv.room_type_id = rt.id
-SET rt.available_count = inv.min_avail;

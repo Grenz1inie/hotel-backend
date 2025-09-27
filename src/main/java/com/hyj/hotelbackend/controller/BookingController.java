@@ -67,13 +67,10 @@ public class BookingController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该状态不允许取消");
         }
         if (!"CANCELLED".equals(b.getStatus())) {
+            String previousStatus = b.getStatus();
             b.setStatus("CANCELLED");
             bookingService.updateById(b);
-            Room r = roomService.getById(b.getRoomId());
-            if (r != null) {
-                r.setAvailableCount(r.getAvailableCount() + 1);
-                roomService.updateById(r);
-            }
+            restoreAvailabilityIfNeeded(b.getRoomId(), previousStatus);
         }
         return b;
     }
@@ -98,6 +95,9 @@ public class BookingController {
                                            @RequestParam(required = false) String status,
                                            @RequestParam(required = false) Long userId,
                                            @RequestParam(required = false) Long roomId,
+                                           @RequestParam(required = false) Long roomTypeId,
+                                           @RequestParam(required = false) Long hotelId,
+                                           @RequestParam(required = false) String contactPhone,
                                            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime start,
                                            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end) {
         AuthUser me = CurrentUserHolder.get();
@@ -109,6 +109,11 @@ public class BookingController {
         if (status != null && !status.isBlank()) qw.eq(Booking::getStatus, status);
         if (userId != null) qw.eq(Booking::getUserId, userId);
         if (roomId != null) qw.eq(Booking::getRoomId, roomId);
+        if (roomTypeId != null) qw.eq(Booking::getRoomTypeId, roomTypeId);
+        if (hotelId != null) qw.eq(Booking::getHotelId, hotelId);
+        if (contactPhone != null && !contactPhone.isBlank()) {
+            qw.like(Booking::getContactPhone, contactPhone);
+        }
         if (start != null && end != null) {
             if (!start.isBefore(end)) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "开始时间必须早于结束时间");
             qw.lt(Booking::getStartTime, end).gt(Booking::getEndTime, start);
@@ -168,7 +173,26 @@ public class BookingController {
         }
         Booking b = bookingService.getById(id);
         if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        if (!"PENDING".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持确认");
+        }
         b.setStatus("CONFIRMED");
+        bookingService.updateById(b);
+        return b;
+    }
+
+    @PutMapping("/bookings/{id}/checkin")
+    public Booking checkinByAdmin(@PathVariable Long id) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null || me.getRole() == null || !me.getRole().equals("ADMIN")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
+        }
+        Booking b = bookingService.getById(id);
+        if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        if (!"CONFIRMED".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持办理入住");
+        }
+        b.setStatus("CHECKED_IN");
         bookingService.updateById(b);
         return b;
     }
@@ -182,13 +206,58 @@ public class BookingController {
         }
         Booking b = bookingService.getById(id);
         if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        if (!"CHECKED_IN".equals(b.getStatus()) && !"CONFIRMED".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持退房");
+        }
+        String previousStatus = b.getStatus();
         b.setStatus("CHECKED_OUT");
         bookingService.updateById(b);
-        Room r = roomService.getById(b.getRoomId());
-        if (r != null) {
-            r.setAvailableCount(r.getAvailableCount() + 1);
-            roomService.updateById(r);
-        }
+        restoreAvailabilityIfNeeded(b.getRoomId(), previousStatus);
         return b;
+    }
+
+    @PutMapping("/bookings/{id}/reject")
+    public Booking rejectByAdmin(@PathVariable Long id) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null || me.getRole() == null || !me.getRole().equals("ADMIN")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
+        }
+        Booking b = bookingService.getById(id);
+        if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        if (!"PENDING".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持拒绝");
+        }
+        String previousStatus = b.getStatus();
+        restoreAvailabilityIfNeeded(b.getRoomId(), previousStatus);
+        b.setStatus("CANCELLED");
+        bookingService.updateById(b);
+        return b;
+    }
+
+    @DeleteMapping("/bookings/{id}")
+    public Booking deleteByAdmin(@PathVariable Long id) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null || me.getRole() == null || !me.getRole().equals("ADMIN")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
+        }
+        Booking b = bookingService.getById(id);
+        if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        restoreAvailabilityIfNeeded(b.getRoomId(), b.getStatus());
+        bookingService.removeById(id);
+        return b;
+    }
+
+    private void restoreAvailabilityIfNeeded(Long roomId, String previousStatus) {
+        if (roomId == null) {
+            return;
+        }
+        if ("CANCELLED".equals(previousStatus) || "CHECKED_OUT".equals(previousStatus)) {
+            return;
+        }
+        Room room = roomService.getById(roomId);
+        if (room != null) {
+            room.setAvailableCount(room.getAvailableCount() + 1);
+            roomService.updateById(room);
+        }
     }
 }
