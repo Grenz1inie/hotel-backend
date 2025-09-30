@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
+import java.time.LocalDateTime;
+
 @Data
 @TableName("users")
 public class User {
@@ -13,4 +15,9 @@ public class User {
     private String password;
     private String role; // ADMIN, USER
     private Integer vipLevel; // 0 normal, 1 vip, 2 svip...
+    private String phone;
+    private String email;
+    private String status;
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }

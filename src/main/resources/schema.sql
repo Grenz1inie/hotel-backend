@@ -44,7 +44,7 @@ CREATE TABLE users
     password   VARCHAR(255)               NOT NULL,
     role       ENUM ('ADMIN','USER')      NOT NULL DEFAULT 'USER',
     vip_level  TINYINT                    NOT NULL DEFAULT 0,
-    phone      VARCHAR(30),
+    phone      VARCHAR(30)                 NOT NULL,
     email      VARCHAR(255),
     status     ENUM ('ACTIVE','DISABLED') NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMP                  NOT NULL DEFAULT CURRENT_TIMESTAMP,

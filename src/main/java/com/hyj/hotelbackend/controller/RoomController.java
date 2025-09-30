@@ -5,6 +5,8 @@ import com.hyj.hotelbackend.auth.AuthUser;
 import com.hyj.hotelbackend.auth.CurrentUserHolder;
 import com.hyj.hotelbackend.entity.Booking;
 import com.hyj.hotelbackend.entity.Room;
+import com.hyj.hotelbackend.entity.User;
+import com.hyj.hotelbackend.mapper.UserMapper;
 import com.hyj.hotelbackend.service.BookingService;
 import com.hyj.hotelbackend.service.RoomService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +29,9 @@ public class RoomController {
 
     @Autowired
     private BookingService bookingService;
+
+    @Autowired
+    private UserMapper userMapper;
 
     @GetMapping
     public List<Room> list() {
@@ -69,13 +74,16 @@ public class RoomController {
                         @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end) {
         AuthUser me = CurrentUserHolder.get();
         if (me == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "未登录");
+        boolean isAdmin = me.getRole() != null && me.getRole().equals("ADMIN");
         Long actualUserId = me.getId();
         if (userId != null && !Objects.equals(userId, me.getId())) {
-            if (me.getRole() != null && me.getRole().equals("ADMIN")) {
+            if (isAdmin) {
                 actualUserId = userId; // admin can book for others
             } else {
                 throw new ResponseStatusException(HttpStatus.FORBIDDEN, "不能为他人创建预订");
             }
+        } else if (isAdmin && userId == null) {
+            actualUserId = resolveOrCreateUser(contactPhone, contactName);
         }
         if (start == null || end == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "start/end 必填");
         if (!start.isBefore(end)) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "开始时间必须早于结束时间");
@@ -188,5 +196,30 @@ public class RoomController {
             roomService.updateById(r);
         }
         return b;
+    }
+
+    private Long resolveOrCreateUser(String contactPhone, String contactName) {
+        if (contactPhone == null || contactPhone.trim().isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "管理员代客预约需提供客户联系电话");
+        }
+        String usernameCandidate = contactPhone.trim();
+        User existing = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getUsername, usernameCandidate));
+        if (existing != null) {
+            return existing.getId();
+        }
+        User u = new User();
+        u.setUsername(usernameCandidate);
+        u.setPassword("123456");
+        u.setRole("USER");
+        u.setVipLevel(0);
+        if (contactPhone != null) {
+            u.setPhone(contactPhone.trim());
+        }
+        u.setStatus("ACTIVE");
+        userMapper.insert(u);
+        if (u.getId() == null) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "创建用户失败");
+        }
+        return u.getId();
     }
 }
