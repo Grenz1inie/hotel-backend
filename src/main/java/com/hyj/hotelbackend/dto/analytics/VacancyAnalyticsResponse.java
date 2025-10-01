@@ -24,6 +24,7 @@ public class VacancyAnalyticsResponse {
         private String roomTypeName;
         private Integer totalRooms;
         private List<VacancyPoint> points = new ArrayList<>();
+        private Map<String, Integer> inventorySnapshot = new HashMap<>();
     }
 
     @Data

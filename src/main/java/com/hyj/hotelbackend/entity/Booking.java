@@ -1,5 +1,6 @@
 package com.hyj.hotelbackend.entity;
 
+import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
@@ -10,7 +11,7 @@ import java.time.LocalDateTime;
 @Data
 @TableName("bookings")
 public class Booking {
-    @TableId
+    @TableId(type = IdType.AUTO)
     private Long id;
 
     @TableField("hotel_id")
@@ -30,13 +31,43 @@ public class Booking {
 
     @TableField("end_time")
     private LocalDateTime endTime;
-    private String status; // PENDING, CONFIRMED, CHECKED_OUT
+    private String status; // PENDING, PENDING_CONFIRMATION, PENDING_PAYMENT, CONFIRMED, CHECKED_IN, CHECKED_OUT, CANCELLED
 
     @TableField("guests")
     private Integer guests;
 
     @TableField("amount")
     private java.math.BigDecimal amount;
+
+    @TableField("original_amount")
+    private java.math.BigDecimal originalAmount;
+
+    @TableField("discount_amount")
+    private java.math.BigDecimal discountAmount;
+
+    @TableField("payable_amount")
+    private java.math.BigDecimal payableAmount;
+
+    @TableField("paid_amount")
+    private java.math.BigDecimal paidAmount;
+
+    @TableField("discount_rate")
+    private java.math.BigDecimal discountRate;
+
+    @TableField("payment_status")
+    private String paymentStatus;
+
+    @TableField("payment_method")
+    private String paymentMethod;
+
+    @TableField("payment_channel")
+    private String paymentChannel;
+
+    @TableField("wallet_transaction_id")
+    private Long walletTransactionId;
+
+    @TableField("payment_record_id")
+    private Long paymentRecordId;
 
     @TableField("currency")
     private String currency;

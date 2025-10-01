@@ -4,8 +4,10 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.hyj.hotelbackend.dto.analytics.VacancyAnalyticsResponse;
 import com.hyj.hotelbackend.entity.Booking;
 import com.hyj.hotelbackend.entity.Room;
+import com.hyj.hotelbackend.entity.RoomInstance;
 import com.hyj.hotelbackend.service.AnalyticsService;
 import com.hyj.hotelbackend.service.BookingService;
+import com.hyj.hotelbackend.service.RoomInstanceService;
 import com.hyj.hotelbackend.service.RoomService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -20,6 +22,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -33,6 +36,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
 
     private final BookingService bookingService;
     private final RoomService roomService;
+    private final RoomInstanceService roomInstanceService;
 
     private enum Granularity {
         HOUR, DAY;
@@ -88,7 +92,18 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         int forecast = forecastDays != null ? Math.max(forecastDays, 0) : (g == Granularity.DAY ? 14 : 2);
 
         List<Room> rooms = resolveRooms(roomTypeIds);
-        Set<Long> roomTypeIdSet = rooms.stream().map(Room::getId).collect(Collectors.toSet());
+        LinkedHashSet<Long> roomTypeIdSet = rooms.stream()
+                .map(Room::getId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        Map<Long, InventorySnapshot> inventorySnapshotMap = loadInventory(roomTypeIdSet);
+        rooms.forEach(room -> {
+            InventorySnapshot snapshot = room.getId() == null ? null : inventorySnapshotMap.get(room.getId());
+            if (snapshot != null) {
+                room.setTotalCount(snapshot.totalRooms());
+                room.setAvailableCount(snapshot.availableRooms());
+            }
+        });
         if (roomTypeIdSet.isEmpty()) {
             VacancyAnalyticsResponse empty = new VacancyAnalyticsResponse();
             empty.setGranularity(g.name());
@@ -121,9 +136,24 @@ public class AnalyticsServiceImpl implements AnalyticsService {
             VacancyAnalyticsResponse.VacancySeries series = new VacancyAnalyticsResponse.VacancySeries();
             series.setRoomTypeId(room.getId());
             series.setRoomTypeName(room.getName());
-            series.setTotalRooms(room.getTotalCount());
+            InventorySnapshot rawSnapshot = room.getId() == null ? null : inventorySnapshotMap.get(room.getId());
+            int fallbackTotal = room.getTotalCount() == null ? 0 : room.getTotalCount();
+            int fallbackAvailable = room.getAvailableCount() == null ? fallbackTotal : room.getAvailableCount();
+            InventorySnapshot snapshot = rawSnapshot != null ? rawSnapshot : new InventorySnapshot(
+                    fallbackTotal,
+                    Math.min(fallbackAvailable, fallbackTotal),
+                    Math.max(0, fallbackTotal - fallbackAvailable),
+                    0,
+                    0,
+                    0
+            );
+            room.setTotalCount(snapshot.totalRooms());
+            room.setAvailableCount(snapshot.availableRooms());
 
-            List<VacancyAnalyticsResponse.VacancyPoint> actualPoints = buildPoints(room, roomBookings, start, end, g, high, low, alerts);
+            series.setTotalRooms(snapshot.totalRooms());
+            series.setInventorySnapshot(snapshot.toMap());
+
+            List<VacancyAnalyticsResponse.VacancyPoint> actualPoints = buildPoints(room, roomBookings, start, end, g, high, low, alerts, snapshot);
             if (!actualPoints.isEmpty()) {
                 series.getPoints().addAll(actualPoints);
             }
@@ -148,15 +178,20 @@ public class AnalyticsServiceImpl implements AnalyticsService {
                                                                     Granularity granularity,
                                                                     double thresholdHigh,
                                                                     double thresholdLow,
-                                                                    List<VacancyAnalyticsResponse.ThresholdAlert> alertsOut) {
+                                    List<VacancyAnalyticsResponse.ThresholdAlert> alertsOut,
+                                    InventorySnapshot snapshot) {
         List<VacancyAnalyticsResponse.VacancyPoint> points = new ArrayList<>();
-        if (room.getTotalCount() == null || room.getTotalCount() <= 0) {
+    int totalRooms = snapshot != null ? snapshot.totalRooms() : (room.getTotalCount() == null ? 0 : room.getTotalCount());
+    if (totalRooms <= 0) {
             return points;
         }
+    int availableRooms = snapshot != null ? snapshot.availableRooms() : (room.getAvailableCount() == null ? totalRooms : room.getAvailableCount());
+    availableRooms = Math.min(availableRooms, totalRooms);
+    int baselineOccupied = Math.max(0, totalRooms - availableRooms);
     LocalDateTime cursor = start;
     while (!cursor.isAfter(end)) {
         final LocalDateTime slotStart = cursor;
-        LocalDateTime slotEnd = slotStart.plus(granularity.stepAmount(), granularity.unit());
+    LocalDateTime slotEnd = slotStart.plus(granularity.stepAmount(), granularity.unit());
             VacancyAnalyticsResponse.VacancyPoint point = new VacancyAnalyticsResponse.VacancyPoint();
         point.setTimestamp(slotStart);
 
@@ -165,10 +200,17 @@ public class AnalyticsServiceImpl implements AnalyticsService {
             .filter(b -> overlaps(b.getStartTime(), b.getEndTime(), slotStart, slotEnd))
                     .collect(Collectors.toList());
 
-            int occupied = overlapping.size();
-            double vacancyCount = Math.max(room.getTotalCount() - occupied, 0);
-            double vacancyRate = room.getTotalCount() == 0 ? 0d : vacancyCount / room.getTotalCount();
-            double bookingRate = room.getTotalCount() == 0 ? 0d : Math.min(occupied / (double) room.getTotalCount(), 1d);
+        int bookingOccupancy = overlapping.isEmpty() ? 0 : Math.max(
+            (int) overlapping.stream()
+                .map(Booking::getRoomId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet()).size(),
+            overlapping.size());
+        int occupied = Math.max(baselineOccupied, bookingOccupancy);
+        occupied = Math.min(occupied, totalRooms);
+        double vacancyCount = Math.max(totalRooms - occupied, 0);
+        double vacancyRate = totalRooms == 0 ? 0d : vacancyCount / totalRooms;
+        double bookingRate = totalRooms == 0 ? 0d : Math.min(occupied / (double) totalRooms, 1d);
 
             point.setVacancyCount(vacancyCount);
             point.setVacancyRate(round(vacancyRate));
@@ -184,6 +226,37 @@ public class AnalyticsServiceImpl implements AnalyticsService {
             cursor = slotEnd;
         }
         return points;
+    }
+
+    private Map<Long, InventorySnapshot> loadInventory(Set<Long> roomTypeIds) {
+        if (CollectionUtils.isEmpty(roomTypeIds)) {
+            return java.util.Collections.emptyMap();
+        }
+        List<RoomInstance> instances = roomInstanceService.lambdaQuery()
+                .in(RoomInstance::getRoomTypeId, roomTypeIds)
+                .list();
+        if (CollectionUtils.isEmpty(instances)) {
+            return java.util.Collections.emptyMap();
+        }
+        Map<Long, InventoryAccumulator> accumulatorMap = new HashMap<>();
+        for (RoomInstance instance : instances) {
+            if (instance == null || instance.getRoomTypeId() == null) {
+                continue;
+            }
+            InventoryAccumulator acc = accumulatorMap.computeIfAbsent(instance.getRoomTypeId(), key -> new InventoryAccumulator());
+            acc.totalRooms++;
+            int status = instance.getStatus() == null ? 0 : instance.getStatus();
+            switch (status) {
+                case 1 -> acc.availableRooms++;
+                case 2 -> acc.reservedRooms++;
+                case 3 -> acc.occupiedRooms++;
+                case 5 -> acc.maintenanceRooms++;
+                default -> acc.lockedRooms++;
+            }
+        }
+        Map<Long, InventorySnapshot> result = new HashMap<>();
+        accumulatorMap.forEach((roomTypeId, acc) -> result.put(roomTypeId, acc.toSnapshot()));
+        return result;
     }
 
     private boolean overlaps(LocalDateTime bookingStart, LocalDateTime bookingEnd, LocalDateTime slotStart, LocalDateTime slotEnd) {
@@ -386,5 +459,43 @@ public class AnalyticsServiceImpl implements AnalyticsService {
     }
 
     private record EventSeed(LocalDate date, String title, String description, String category) {
+    }
+
+    private static final class InventoryAccumulator {
+        private int totalRooms;
+        private int availableRooms;
+        private int reservedRooms;
+        private int occupiedRooms;
+        private int maintenanceRooms;
+        private int lockedRooms;
+
+        private InventorySnapshot toSnapshot() {
+            int total = totalRooms;
+            int available = Math.max(0, Math.min(availableRooms, total));
+            int reserved = Math.max(0, Math.min(reservedRooms, total));
+            int occupied = Math.max(0, Math.min(occupiedRooms, total));
+            int maintenance = Math.max(0, Math.min(maintenanceRooms, total));
+            int locked = Math.max(0, Math.min(lockedRooms, total));
+            return new InventorySnapshot(total, available, reserved, occupied, maintenance, locked);
+        }
+    }
+
+    private record InventorySnapshot(int totalRooms,
+                                     int availableRooms,
+                                     int reservedRooms,
+                                     int occupiedRooms,
+                                     int maintenanceRooms,
+                                     int lockedRooms) {
+
+        private Map<String, Integer> toMap() {
+            Map<String, Integer> map = new HashMap<>();
+            map.put("total", totalRooms);
+            map.put("available", availableRooms);
+            map.put("reserved", reservedRooms);
+            map.put("occupied", occupiedRooms);
+            map.put("maintenance", maintenanceRooms);
+            map.put("locked", lockedRooms);
+            return map;
+        }
     }
 }

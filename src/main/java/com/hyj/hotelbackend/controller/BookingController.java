@@ -7,8 +7,16 @@ import com.hyj.hotelbackend.auth.CurrentUserHolder;
 import com.hyj.hotelbackend.common.PageResponse;
 import com.hyj.hotelbackend.entity.Booking;
 import com.hyj.hotelbackend.entity.Room;
+import com.hyj.hotelbackend.entity.RoomInstance;
+import com.hyj.hotelbackend.entity.WalletTransaction;
+import com.hyj.hotelbackend.entity.User;
 import com.hyj.hotelbackend.service.BookingService;
 import com.hyj.hotelbackend.service.RoomService;
+import com.hyj.hotelbackend.service.RoomInstanceService;
+import com.hyj.hotelbackend.service.WalletService;
+import com.hyj.hotelbackend.service.PaymentService;
+import com.hyj.hotelbackend.service.VipPricingService;
+import com.hyj.hotelbackend.mapper.UserMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
@@ -27,6 +35,22 @@ public class BookingController {
 
     @Autowired
     private RoomService roomService;
+
+    @Autowired
+    private RoomInstanceService roomInstanceService;
+
+    @Autowired
+    private WalletService walletService;
+
+    @Autowired
+    private PaymentService paymentService;
+
+    @Autowired
+    private VipPricingService vipPricingService;
+
+    @Autowired
+    private UserMapper userMapper;
+
 
     // GET /api/users/{userId}/bookings?status=&page=&size=
     @GetMapping("/users/{userId}/bookings")
@@ -69,8 +93,9 @@ public class BookingController {
         if (!"CANCELLED".equals(b.getStatus())) {
             String previousStatus = b.getStatus();
             b.setStatus("CANCELLED");
+            handleRefundIfNecessary(b, "用户取消");
             bookingService.updateById(b);
-            restoreAvailabilityIfNeeded(b.getRoomId(), previousStatus);
+            restoreAvailabilityIfNeeded(b, previousStatus);
         }
         return b;
     }
@@ -105,7 +130,7 @@ public class BookingController {
         if (me.getRole() == null || !me.getRole().equals("ADMIN")) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可查看全部订单");
         }
-        LambdaQueryWrapper<Booking> qw = new LambdaQueryWrapper<>();
+    LambdaQueryWrapper<Booking> qw = new LambdaQueryWrapper<>();
         if (status != null && !status.isBlank()) qw.eq(Booking::getStatus, status);
         if (userId != null) qw.eq(Booking::getUserId, userId);
         if (roomId != null) qw.eq(Booking::getRoomId, roomId);
@@ -117,9 +142,18 @@ public class BookingController {
         if (start != null && end != null) {
             if (!start.isBefore(end)) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "开始时间必须早于结束时间");
             qw.lt(Booking::getStartTime, end).gt(Booking::getEndTime, start);
-        }
-        qw.orderByDesc(Booking::getStartTime);
-        Page<Booking> p = bookingService.page(new Page<>(page, size), qw);
+    }
+    qw.last(" ORDER BY CASE status " +
+        "WHEN 'PENDING' THEN 1 " +
+        "WHEN 'PENDING_CONFIRMATION' THEN 2 " +
+        "WHEN 'PENDING_PAYMENT' THEN 3 " +
+        "WHEN 'CONFIRMED' THEN 4 " +
+        "WHEN 'CHECKED_IN' THEN 5 " +
+        "WHEN 'CHECKED_OUT' THEN 6 " +
+        "WHEN 'CANCELLED' THEN 7 " +
+        "WHEN 'REFUNDED' THEN 8 " +
+        "ELSE 99 END, start_time DESC, id DESC");
+    Page<Booking> p = bookingService.page(new Page<>(page, size), qw);
         return PageResponse.of(p.getRecords(), p.getCurrent(), p.getSize(), p.getTotal());
     }
 
@@ -141,15 +175,15 @@ public class BookingController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该状态不允许改期");
         }
         // 重叠校验：排除自身
-        long overlapping = bookingService.count(new LambdaQueryWrapper<Booking>()
-                .eq(Booking::getRoomId, b.getRoomId())
+    long overlapping = bookingService.count(new LambdaQueryWrapper<Booking>()
+        .eq(Booking::getRoomTypeId, b.getRoomTypeId())
                 .ne(Booking::getStatus, "CHECKED_OUT")
                 .ne(Booking::getStatus, "CANCELLED")
                 .ne(Booking::getId, id)
                 .lt(Booking::getStartTime, end)
                 .gt(Booking::getEndTime, start)
         );
-        Room r = roomService.getById(b.getRoomId());
+    Room r = roomService.getById(b.getRoomTypeId());
         if (r == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在");
         if (overlapping >= r.getTotalCount()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "库存不足或时间段冲突");
@@ -157,8 +191,8 @@ public class BookingController {
         // 更新时间与金额
         b.setStartTime(start);
         b.setEndTime(end);
-        long days = java.time.Duration.between(start.toLocalDate().atStartOfDay(), end.toLocalDate().atStartOfDay()).toDays();
-        if (days <= 0) days = 1;
+        int checkoutHour = vipPricingService.getCheckoutBoundaryHour(resolveUserVipLevel(b.getUserId()));
+        long days = computeChargeableDays(start, end, checkoutHour);
         b.setAmount(r.getPricePerNight().multiply(java.math.BigDecimal.valueOf(days)));
         bookingService.updateById(b);
         return b;
@@ -173,11 +207,12 @@ public class BookingController {
         }
         Booking b = bookingService.getById(id);
         if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
-        if (!"PENDING".equals(b.getStatus())) {
+        if (!isPendingLikeStatus(b.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持确认");
         }
         b.setStatus("CONFIRMED");
         bookingService.updateById(b);
+        markRoomInstanceStatus(b.getRoomId(), 2, false);
         return b;
     }
 
@@ -194,6 +229,7 @@ public class BookingController {
         }
         b.setStatus("CHECKED_IN");
         bookingService.updateById(b);
+        markRoomInstanceStatus(b.getRoomId(), 3, false);
         return b;
     }
 
@@ -212,7 +248,7 @@ public class BookingController {
         String previousStatus = b.getStatus();
         b.setStatus("CHECKED_OUT");
         bookingService.updateById(b);
-        restoreAvailabilityIfNeeded(b.getRoomId(), previousStatus);
+    restoreAvailabilityIfNeeded(b, previousStatus);
         return b;
     }
 
@@ -224,12 +260,13 @@ public class BookingController {
         }
         Booking b = bookingService.getById(id);
         if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
-        if (!"PENDING".equals(b.getStatus())) {
+        if (!isPendingLikeStatus(b.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持拒绝");
         }
         String previousStatus = b.getStatus();
-        restoreAvailabilityIfNeeded(b.getRoomId(), previousStatus);
+    restoreAvailabilityIfNeeded(b, previousStatus);
         b.setStatus("CANCELLED");
+        handleRefundIfNecessary(b, "管理员拒绝订单");
         bookingService.updateById(b);
         return b;
     }
@@ -242,22 +279,109 @@ public class BookingController {
         }
         Booking b = bookingService.getById(id);
         if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
-        restoreAvailabilityIfNeeded(b.getRoomId(), b.getStatus());
+        handleRefundIfNecessary(b, "管理员删除订单");
+    restoreAvailabilityIfNeeded(b, b.getStatus());
         bookingService.removeById(id);
         return b;
     }
 
-    private void restoreAvailabilityIfNeeded(Long roomId, String previousStatus) {
-        if (roomId == null) {
+    private void handleRefundIfNecessary(Booking booking, String remark) {
+        if (booking == null) {
             return;
         }
-        if ("CANCELLED".equals(previousStatus) || "CHECKED_OUT".equals(previousStatus)) {
+        if (!"PAID".equalsIgnoreCase(String.valueOf(booking.getPaymentStatus()))) {
             return;
         }
-        Room room = roomService.getById(roomId);
-        if (room != null) {
-            room.setAvailableCount(room.getAvailableCount() + 1);
-            roomService.updateById(room);
+        java.math.BigDecimal paid = booking.getPaidAmount();
+        if (paid == null || paid.compareTo(java.math.BigDecimal.ZERO) <= 0) {
+            return;
         }
+        String method = booking.getPaymentMethod() == null ? "" : booking.getPaymentMethod().toUpperCase();
+        java.math.BigDecimal amount = paid;
+        if ("WALLET".equals(method)) {
+            WalletTransaction tx = walletService.refund(booking.getUserId(), amount, "WALLET", booking.getId(), remark);
+            booking.setWalletTransactionId(tx.getId());
+        } else {
+            if (booking.getPaymentRecordId() != null) {
+                paymentService.markRefund(booking.getPaymentRecordId(), "REFUNDED");
+            }
+        }
+        booking.setPaidAmount(java.math.BigDecimal.ZERO);
+        booking.setPaymentStatus("REFUNDED");
+    }
+
+    private void restoreAvailabilityIfNeeded(Booking booking, String previousStatus) {
+        if (booking == null) {
+            return;
+        }
+        String normalized = previousStatus == null ? "" : previousStatus.toUpperCase();
+        if (!"CANCELLED".equals(normalized) && !"CHECKED_OUT".equals(normalized)) {
+            Long roomTypeId = booking.getRoomTypeId();
+            if (roomTypeId != null) {
+                Room roomType = roomService.getById(roomTypeId);
+                if (roomType != null) {
+                    int current = roomType.getAvailableCount() == null ? 0 : roomType.getAvailableCount();
+                    int total = roomType.getTotalCount() == null ? Integer.MAX_VALUE : roomType.getTotalCount();
+                    roomType.setAvailableCount(Math.min(total, current + 1));
+                    roomService.updateById(roomType);
+                }
+            }
+        }
+        boolean stayed = "CHECKED_IN".equals(normalized) || "CHECKED_OUT".equals(normalized);
+        markRoomInstanceStatus(booking.getRoomId(), 1, stayed);
+    }
+
+    private void markRoomInstanceStatus(Long roomInstanceId, int status, boolean updateCheckoutTime) {
+        if (roomInstanceId == null) {
+            return;
+        }
+        RoomInstance instance = roomInstanceService.getById(roomInstanceId);
+        if (instance == null) {
+            return;
+        }
+        instance.setStatus(status);
+        instance.setUpdatedTime(LocalDateTime.now());
+        if (updateCheckoutTime) {
+            instance.setLastCheckoutTime(LocalDateTime.now());
+        }
+        roomInstanceService.updateById(instance);
+    }
+
+    private boolean isPendingLikeStatus(String status) {
+        if (status == null) {
+            return false;
+        }
+        String value = status.toUpperCase();
+        return "PENDING".equals(value) || "PENDING_CONFIRMATION".equals(value) || "PENDING_PAYMENT".equals(value);
+    }
+
+    private int resolveUserVipLevel(Long userId) {
+        if (userId == null) {
+            return 0;
+        }
+        User user = userMapper.selectById(userId);
+        if (user == null || user.getVipLevel() == null) {
+            return 0;
+        }
+        return user.getVipLevel();
+    }
+
+    private long computeChargeableDays(LocalDateTime start, LocalDateTime end, Integer checkoutHour) {
+        if (start == null || end == null || !start.isBefore(end)) {
+            return 1L;
+        }
+        long days = 1L;
+        int rawHour = checkoutHour == null ? 12 : checkoutHour;
+        int normalizedHour = Math.floorMod(rawHour, 24);
+        int extraDays = rawHour / 24;
+        LocalDateTime boundary = start.toLocalDate().atStartOfDay().plusHours(normalizedHour).plusDays(extraDays);
+        if (!start.isBefore(boundary)) {
+            boundary = boundary.plusDays(1);
+        }
+        while (end.isAfter(boundary)) {
+            days++;
+            boundary = boundary.plusDays(1);
+        }
+        return days;
     }
 }

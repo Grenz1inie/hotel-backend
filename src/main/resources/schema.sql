@@ -3,6 +3,10 @@
 
 SET FOREIGN_KEY_CHECKS = 0;
 
+DROP TABLE IF EXISTS vip_level_policy;
+DROP TABLE IF EXISTS wallet_transaction;
+DROP TABLE IF EXISTS payment_record;
+DROP TABLE IF EXISTS wallet_account;
 DROP TABLE IF EXISTS bookings;
 DROP TABLE IF EXISTS room_maintenance;
 DROP TABLE IF EXISTS room_price_strategy;
@@ -55,6 +59,21 @@ CREATE TABLE users
   COLLATE = utf8mb4_general_ci
   COMMENT ='用户表';
 
+-- 会员等级策略表
+CREATE TABLE vip_level_policy
+(
+        level         TINYINT PRIMARY KEY COMMENT '会员等级',
+        name          VARCHAR(50)                        NOT NULL COMMENT '等级名称',
+        discount_rate DECIMAL(4, 3)                      NOT NULL DEFAULT 1.000 COMMENT '基础折扣率',
+        checkout_hour TINYINT                            NOT NULL DEFAULT 12 COMMENT '跨日计费开始小时（0-23，对应次日的计费起始）',
+        description   VARCHAR(255)                                COMMENT '权益描述',
+        created_at    TIMESTAMP                          NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at    TIMESTAMP                          NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE = InnoDB
+    DEFAULT CHARSET = utf8mb4
+    COLLATE = utf8mb4_general_ci
+    COMMENT ='会员等级权益策略';
+
 -- 房型表，承载聚合维度并兼容旧 rooms 表字段
 CREATE TABLE room_type
 (
@@ -98,7 +117,8 @@ CREATE TABLE room
     CONSTRAINT fk_room_room_type FOREIGN KEY (room_type_id) REFERENCES room_type (id) ON DELETE CASCADE,
     UNIQUE KEY uk_room_hotel_no (hotel_id, room_number),
     KEY idx_room_type (room_type_id),
-    KEY idx_room_status (hotel_id, status)
+    KEY idx_room_status (hotel_id, status),
+    KEY idx_room_type_status (room_type_id, status)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_general_ci
@@ -131,6 +151,7 @@ CREATE TABLE room_price_strategy
     end_date       DATE               NOT NULL,
     price_adjust   DECIMAL(10, 2) DEFAULT 0.00 COMMENT '加价金额（可负数）',
     discount_rate  DECIMAL(3, 2)  DEFAULT NULL COMMENT '折扣率，仅类型2/3使用',
+    vip_level      TINYINT         DEFAULT NULL COMMENT '适用的VIP等级，仅类型2（会员折扣）使用',
     min_stay_days  TINYINT         DEFAULT 1 COMMENT '最小连住天数，仅类型3使用',
     status         TINYINT         DEFAULT 1 NOT NULL,
     created_time   DATETIME        DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -174,9 +195,19 @@ CREATE TABLE bookings
     user_id       BIGINT                                                                     NOT NULL,
     start_time    DATETIME                                                                   NOT NULL,
     end_time      DATETIME                                                                   NOT NULL,
-    status        ENUM ('PENDING','CONFIRMED','CHECKED_IN','CHECKED_OUT','CANCELLED','REFUNDED') NOT NULL DEFAULT 'PENDING',
+    status        ENUM ('PENDING','PENDING_CONFIRMATION','PENDING_PAYMENT','CONFIRMED','CHECKED_IN','CHECKED_OUT','CANCELLED','REFUNDED') NOT NULL DEFAULT 'PENDING',
     guests        INT                                                                        NOT NULL DEFAULT 1,
     amount        DECIMAL(10, 2)                                                             NOT NULL DEFAULT 0.00,
+    original_amount DECIMAL(10, 2)                                                           NOT NULL DEFAULT 0.00,
+    discount_amount DECIMAL(10, 2)                                                           NOT NULL DEFAULT 0.00,
+    payable_amount DECIMAL(10, 2)                                                            NOT NULL DEFAULT 0.00,
+    paid_amount   DECIMAL(10, 2)                                                             NOT NULL DEFAULT 0.00,
+    discount_rate DECIMAL(4, 3)                                                              NOT NULL DEFAULT 1.000,
+    payment_status ENUM('UNPAID','PAID','PARTIAL_REFUND','REFUNDED','WAIVED')                NOT NULL DEFAULT 'UNPAID',
+    payment_method VARCHAR(40),
+    payment_channel VARCHAR(40),
+    wallet_transaction_id BIGINT,
+    payment_record_id BIGINT,
     currency      CHAR(3)                                                                    NOT NULL DEFAULT 'CNY',
     contact_name  VARCHAR(100),
     contact_phone VARCHAR(30),
@@ -186,15 +217,81 @@ CREATE TABLE bookings
     CONSTRAINT fk_bookings_hotel FOREIGN KEY (hotel_id) REFERENCES hotel (id),
     CONSTRAINT fk_bookings_room_type FOREIGN KEY (room_type_id) REFERENCES room_type (id),
     CONSTRAINT fk_bookings_room FOREIGN KEY (room_id) REFERENCES room (id),
-    CONSTRAINT fk_bookings_user FOREIGN KEY (user_id) REFERENCES users (id),
+        CONSTRAINT fk_bookings_user FOREIGN KEY (user_id) REFERENCES users (id),
     KEY idx_bookings_user (user_id),
     KEY idx_bookings_status (status),
     KEY idx_bookings_room (room_id),
-    KEY idx_bookings_period (start_time, end_time)
+    KEY idx_bookings_period (start_time, end_time),
+    KEY idx_bookings_room_type_period (room_type_id, start_time),
+    KEY idx_bookings_room_type_room (room_type_id, room_id, start_time)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_general_ci
   COMMENT ='订单表';
+
+-- 钱包账户
+CREATE TABLE wallet_account
+(
+        id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+        user_id         BIGINT                               NOT NULL UNIQUE,
+        balance         DECIMAL(12, 2)                       NOT NULL DEFAULT 0.00,
+        frozen_balance  DECIMAL(12, 2)                       NOT NULL DEFAULT 0.00,
+        status          ENUM('ACTIVE','FROZEN')              NOT NULL DEFAULT 'ACTIVE',
+        created_at      TIMESTAMP                            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP                            NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_wallet_account_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+    DEFAULT CHARSET = utf8mb4
+    COLLATE = utf8mb4_general_ci
+    COMMENT ='用户钱包账户';
+
+-- 钱包交易流水
+CREATE TABLE wallet_transaction
+(
+        id             BIGINT PRIMARY KEY AUTO_INCREMENT,
+        wallet_id      BIGINT                               NOT NULL,
+        user_id        BIGINT                               NOT NULL,
+        booking_id     BIGINT                               NULL,
+        type           ENUM('RECHARGE','PAYMENT','REFUND','ADJUST') NOT NULL,
+        direction      ENUM('IN','OUT')                     NOT NULL,
+        amount         DECIMAL(12, 2)                       NOT NULL,
+        balance_after  DECIMAL(12, 2)                       NOT NULL,
+        payment_channel VARCHAR(40),
+        reference_no   VARCHAR(100),
+        remark         VARCHAR(255),
+        created_at     TIMESTAMP                            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_wallet_tx_wallet FOREIGN KEY (wallet_id) REFERENCES wallet_account (id) ON DELETE CASCADE,
+        CONSTRAINT fk_wallet_tx_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        CONSTRAINT fk_wallet_tx_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE SET NULL,
+        KEY idx_wallet_tx_user (user_id, id),
+        KEY idx_wallet_tx_booking (booking_id)
+) ENGINE = InnoDB
+    DEFAULT CHARSET = utf8mb4
+    COLLATE = utf8mb4_general_ci
+    COMMENT ='钱包交易流水';
+
+-- 非钱包直接支付记录
+CREATE TABLE payment_record
+(
+        id             BIGINT PRIMARY KEY AUTO_INCREMENT,
+        booking_id     BIGINT                               NOT NULL,
+        user_id        BIGINT                               NOT NULL,
+        amount         DECIMAL(12, 2)                       NOT NULL,
+        method         VARCHAR(40)                          NOT NULL,
+        channel        VARCHAR(40),
+        status         ENUM('PENDING','PAID','REFUNDED','PARTIAL_REFUND') NOT NULL DEFAULT 'PAID',
+        paid_at        TIMESTAMP NULL,
+        refunded_at    TIMESTAMP NULL,
+        reference_no   VARCHAR(100),
+        created_at     TIMESTAMP                            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at     TIMESTAMP                            NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_payment_record_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE,
+        CONSTRAINT fk_payment_record_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        KEY idx_payment_record_user (user_id, id)
+) ENGINE = InnoDB
+    DEFAULT CHARSET = utf8mb4
+    COLLATE = utf8mb4_general_ci
+    COMMENT ='直接支付记录';
 
 -- -----------------------------------------------------------------------------
 -- 初始化数据
@@ -245,20 +342,86 @@ VALUES
     ('charlie', 'charliepwd', 'USER', 2, '13800000003', 'charlie@example.com'),
     ('diana', 'dianapwd', 'USER', 1, '13800000004', 'diana@example.com'),
     ('leo', 'leopwd', 'USER', 3, '13700000005', 'leo@example.com'),
-    ('mia', 'miapwd', 'USER', 2, '13700000006', 'mia@example.com');
+    ('mia', 'miapwd', 'USER', 2, '13700000006', 'mia@example.com'),
+    ('nina', 'ninapwd', 'USER', 0, '13600000007', 'nina@example.com'),
+    ('oscar', 'oscarpwd', 'USER', 1, '13600000008', 'oscar@example.com'),
+    ('paul', 'paulpwd', 'USER', 2, '13600000009', 'paul@example.com'),
+    ('quinn', 'quinnpwd', 'USER', 3, '13600000010', 'quinn@example.com'),
+    ('rachel', 'rachelpwd', 'USER', 4, '13600000011', 'rachel@example.com');
+
+-- 会员等级策略数据
+INSERT INTO vip_level_policy (level, name, discount_rate, checkout_hour, description)
+VALUES
+    (0, '普通会员', 1.000, 12, '注册即享，标准退房时间为次日中午 12:00'),
+    (1, '白银会员', 0.950, 13, '年累计消费满 5000 元即可晋升，退房时间延长至次日 13:00'),
+    (2, '黄金会员', 0.900, 14, '年累计消费满 15000 元即可晋升，退房时间延长至次日 14:00'),
+    (3, '铂金会员', 0.880, 15, '年累计消费满 30000 元即可晋升，退房时间延长至次日 15:00'),
+    (4, '钻石会员', 0.850, 16, '核心客户定向邀约（建议年消费 50000 元以上），附加贵宾礼遇与私享管家');
+
+-- 初始化钱包账户
+INSERT INTO wallet_account (user_id, balance, frozen_balance)
+SELECT id,
+       CASE
+           WHEN vip_level >= 3 THEN 18500.00
+           WHEN vip_level = 2 THEN 5000.00
+           WHEN vip_level = 1 THEN 1600.00
+           ELSE 400.00
+       END AS balance,
+       0.00
+FROM users;
 
 -- 房型数据
 INSERT INTO room_type (hotel_id, name, type, description, price_per_night, total_count, available_count, images, amenities, area_sqm, bed_type, max_guests)
 VALUES
-    (1, '星河行政大床房', 'Executive', '落地窗景观，含行政酒廊礼遇与次日双人早餐', 568.00, 18, 16, NULL, JSON_ARRAY('WIFI','55寸电视','空气净化','浴缸','行政酒廊'), 35.0, 'King', 2),
-    (1, '星河家庭套房', 'FamilySuite', '双卧设计，客厅配备儿童帐篷与游戏角', 1188.00, 8, 8, NULL, JSON_ARRAY('WIFI','洗衣烘干一体机','咖啡机','儿童玩具','浴缸'), 68.0, 'King+Twin', 4),
-    (1, '星河城市景观房', 'CityView', '高层城市景观房型，附赠欢迎水果与晚安甜品', 468.00, 24, 20, NULL, JSON_ARRAY('WIFI','蓝牙音响','迷你吧','浴袍','智能语音'), 30.0, 'Queen', 2),
-    (2, '海天无边海景房', 'SeaPremium', '观景阳台，可直接眺望黄浦江夜景', 828.00, 12, 10, NULL, JSON_ARRAY('WIFI','阳台躺椅','胶囊咖啡','浴缸','智能窗帘'), 36.0, 'King', 2),
-    (2, '海天亲子乐园房', 'FamilyTheme', '亲子主题装饰，提供儿童滑梯、绘本与加湿器', 688.00, 14, 12, NULL, JSON_ARRAY('WIFI','儿童滑梯','绘本角','空气加湿','浴袍'), 42.0, 'Queen+Single', 4),
-    (2, '海天尊享套房', 'SkySuite', '双层挑空客厅并配私人管家服务', 1368.00, 5, 5, NULL, JSON_ARRAY('WIFI','私人管家','影音室','梳妆台','浴缸'), 92.0, 'King', 3),
-    (3, '云栖温泉大床房', 'HotSpring', '客房自带私汤泡池，含欢迎水果与晨间瑜伽', 998.00, 10, 9, NULL, JSON_ARRAY('WIFI','私汤泡池','壁炉','空净系统','瑜伽垫'), 48.0, 'King', 2),
-    (3, '云栖森林木屋', 'Chalet', '独栋木屋，露台可观星，适合亲友小聚', 1288.00, 6, 6, NULL, JSON_ARRAY('WIFI','露台壁炉','厨房','投影仪','咖啡机'), 75.0, 'King+Sofa', 4),
-    (3, '云栖禅意套房', 'ZenSuite', '榻榻米起居室与茶道体验角，含双人禅修课程', 1588.00, 4, 4, NULL, JSON_ARRAY('WIFI','香薰加湿','茶道角','冥想垫','BOSE音响'), 85.0, 'Tatami', 3);
+    (1, '星河行政大床房', 'Executive', '落地窗景观，含行政酒廊礼遇与次日双人早餐', 568.00, 18, 11, NULL, JSON_ARRAY('WIFI','55寸电视','空气净化','浴缸','行政酒廊','USB充电端口','高速办公桌','智能窗帘'), 35.0, 'King', 2),
+    (1, '星河家庭套房', 'FamilySuite', '双卧设计，客厅配备儿童帐篷与游戏角', 1188.00, 8, 4, NULL, JSON_ARRAY('WIFI','洗衣烘干一体机','咖啡机','儿童玩具','浴缸','儿童餐具','微波炉','亲子桌游'), 68.0, 'King+Twin', 4),
+    (1, '星河城市景观房', 'CityView', '高层城市景观房型，附赠欢迎水果与晚安甜品', 468.00, 24, 15, NULL, JSON_ARRAY('WIFI','蓝牙音响','迷你吧','浴袍','智能语音','夜床服务','香薰机','电子保险箱'), 30.0, 'Queen', 2),
+    (2, '海天无边海景房', 'SeaPremium', '观景阳台，可直接眺望黄浦江夜景', 828.00, 12, 10, NULL, JSON_ARRAY('WIFI','阳台躺椅','胶囊咖啡','浴缸','智能窗帘','户外泡池','香薰机','BOSE音响'), 36.0, 'King', 2),
+    (2, '海天亲子乐园房', 'FamilyTheme', '亲子主题装饰，提供儿童滑梯、绘本与加湿器', 688.00, 14, 12, NULL, JSON_ARRAY('WIFI','儿童滑梯','绘本角','空气加湿','浴袍','益智拼图','儿童浴袍','夜光墙贴'), 42.0, 'Queen+Single', 4),
+    (2, '海天尊享套房', 'SkySuite', '双层挑空客厅并配私人管家服务', 1368.00, 5, 3, NULL, JSON_ARRAY('WIFI','私人管家','影音室','梳妆台','浴缸','私人影院','云端办公台','香槟迷你吧'), 92.0, 'King', 3),
+    (3, '云栖温泉大床房', 'HotSpring', '客房自带私汤泡池，含欢迎水果与晨间瑜伽', 998.00, 10, 9, NULL, JSON_ARRAY('WIFI','私汤泡池','壁炉','空净系统','瑜伽垫','香薰枕','森林浴音效','有机茶包'), 48.0, 'King', 2),
+    (3, '云栖森林木屋', 'Chalet', '独栋木屋，露台可观星，适合亲友小聚', 1288.00, 6, 4, NULL, JSON_ARRAY('WIFI','露台壁炉','厨房','投影仪','咖啡机','露营灯','户外烧烤架','观星望远镜'), 75.0, 'King+Sofa', 4),
+    (3, '云栖禅意套房', 'ZenSuite', '榻榻米起居室与茶道体验角，含双人禅修课程', 1588.00, 4, 3, NULL, JSON_ARRAY('WIFI','香薰加湿','茶道角','冥想垫','BOSE音响','香道礼盒','手工茶具','睡眠香薰'), 85.0, 'Tatami', 3);
+
+-- 会员专属房型折扣策略
+INSERT INTO room_price_strategy (hotel_id, room_type_id, strategy_type, start_date, end_date, price_adjust, discount_rate, vip_level, min_stay_days, status)
+VALUES
+    (1, 1, 2, '2024-01-01', '2030-12-31', 0.00, 0.95, 1, 1, 1),
+    (1, 1, 2, '2024-01-01', '2030-12-31', 0.00, 0.90, 2, 1, 1),
+    (1, 1, 2, '2024-01-01', '2030-12-31', 0.00, 0.88, 3, 1, 1),
+    (1, 1, 2, '2024-01-01', '2030-12-31', 0.00, 0.85, 4, 1, 1),
+    (1, 2, 2, '2024-01-01', '2030-12-31', 0.00, 0.96, 1, 1, 1),
+    (1, 2, 2, '2024-01-01', '2030-12-31', 0.00, 0.92, 2, 1, 1),
+    (1, 2, 2, '2024-01-01', '2030-12-31', 0.00, 0.89, 3, 1, 1),
+    (1, 2, 2, '2024-01-01', '2030-12-31', 0.00, 0.86, 4, 1, 1),
+    (1, 3, 2, '2024-01-01', '2030-12-31', 0.00, 0.97, 1, 1, 1),
+    (1, 3, 2, '2024-01-01', '2030-12-31', 0.00, 0.93, 2, 1, 1),
+    (1, 3, 2, '2024-01-01', '2030-12-31', 0.00, 0.90, 3, 1, 1),
+    (1, 3, 2, '2024-01-01', '2030-12-31', 0.00, 0.87, 4, 1, 1),
+    (2, 4, 2, '2024-01-01', '2030-12-31', 0.00, 0.94, 1, 1, 1),
+    (2, 4, 2, '2024-01-01', '2030-12-31', 0.00, 0.89, 2, 1, 1),
+    (2, 4, 2, '2024-01-01', '2030-12-31', 0.00, 0.86, 3, 1, 1),
+    (2, 4, 2, '2024-01-01', '2030-12-31', 0.00, 0.83, 4, 1, 1),
+    (2, 5, 2, '2024-01-01', '2030-12-31', 0.00, 0.96, 1, 1, 1),
+    (2, 5, 2, '2024-01-01', '2030-12-31', 0.00, 0.91, 2, 1, 1),
+    (2, 5, 2, '2024-01-01', '2030-12-31', 0.00, 0.88, 3, 1, 1),
+    (2, 5, 2, '2024-01-01', '2030-12-31', 0.00, 0.85, 4, 1, 1),
+    (2, 6, 2, '2024-01-01', '2030-12-31', 0.00, 0.93, 1, 1, 1),
+    (2, 6, 2, '2024-01-01', '2030-12-31', 0.00, 0.88, 2, 1, 1),
+    (2, 6, 2, '2024-01-01', '2030-12-31', 0.00, 0.85, 3, 1, 1),
+    (2, 6, 2, '2024-01-01', '2030-12-31', 0.00, 0.82, 4, 1, 1),
+    (3, 7, 2, '2024-01-01', '2030-12-31', 0.00, 0.95, 1, 1, 1),
+    (3, 7, 2, '2024-01-01', '2030-12-31', 0.00, 0.90, 2, 1, 1),
+    (3, 7, 2, '2024-01-01', '2030-12-31', 0.00, 0.87, 3, 1, 1),
+    (3, 7, 2, '2024-01-01', '2030-12-31', 0.00, 0.84, 4, 1, 1),
+    (3, 8, 2, '2024-01-01', '2030-12-31', 0.00, 0.94, 1, 1, 1),
+    (3, 8, 2, '2024-01-01', '2030-12-31', 0.00, 0.89, 2, 1, 1),
+    (3, 8, 2, '2024-01-01', '2030-12-31', 0.00, 0.86, 3, 1, 1),
+    (3, 8, 2, '2024-01-01', '2030-12-31', 0.00, 0.83, 4, 1, 1),
+    (3, 9, 2, '2024-01-01', '2030-12-31', 0.00, 0.93, 1, 1, 1),
+    (3, 9, 2, '2024-01-01', '2030-12-31', 0.00, 0.88, 2, 1, 1),
+    (3, 9, 2, '2024-01-01', '2030-12-31', 0.00, 0.85, 3, 1, 1),
+    (3, 9, 2, '2024-01-01', '2030-12-31', 0.00, 0.82, 4, 1, 1);
 
 -- 房型图片（示例）
 INSERT INTO room_images (room_type_id, url, is_primary, sort_order)
@@ -301,38 +464,50 @@ SET images = (
 );
 SET SESSION group_concat_max_len = @old_len;
 
--- 具体房间生成（示例：按房型数量创建房间号）
+-- 为兼容 MySQL 5.7 及以下版本，使用派生数字表生成序列（最大支持 400 间房）
 INSERT INTO room (hotel_id, room_type_id, room_number, floor, status)
 SELECT rt.hotel_id,
        rt.id,
-       CONCAT(CHAR(64 + rt.type_rank), LPAD(floors.floor_num, 2, '0'), LPAD(seqs.seq, 2, '0')) AS room_number,
-       floors.floor_num,
+       CONCAT(
+           CHAR(64 + rt.type_rank),
+           LPAD(((seq.n - 1) DIV 8) + 1, 2, '0'),
+           LPAD(((seq.n - 1) % 8) + 1, 2, '0')
+       ) AS room_number,
+       ((seq.n - 1) DIV 8) + 1 AS floor,
        1 AS status
 FROM (
-         SELECT id,
-                hotel_id,
-                total_count,
-                ROW_NUMBER() OVER (PARTITION BY hotel_id ORDER BY id) AS type_rank
-         FROM room_type
+      SELECT sub.id,
+          sub.hotel_id,
+          sub.total_count,
+          sub.type_rank
+      FROM (
+            SELECT rt_inner.id,
+                rt_inner.hotel_id,
+                rt_inner.total_count,
+                (@row_num := IF(@current_hotel = rt_inner.hotel_id, @row_num + 1, 1)) AS type_rank,
+                @current_hotel := rt_inner.hotel_id AS _hotel_marker
+            FROM (
+                  SELECT id, hotel_id, total_count
+                  FROM room_type
+                  ORDER BY hotel_id, id
+              ) AS rt_inner
+                  CROSS JOIN (SELECT @row_num := 0, @current_hotel := NULL) AS vars
+        ) AS sub
      ) rt
          JOIN (
-    SELECT 1 AS floor_num UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
-    UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
-) floors
-         JOIN (
-    SELECT 1 AS seq UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
-    UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
-    UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15
-) seqs
-WHERE (floors.floor_num - 1) * 10 + seqs.seq <= rt.total_count;
+    SELECT ones.n + tens.n * 10 + hundreds.n * 100 + 1 AS n
+    FROM (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) AS ones
+    CROSS JOIN (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) AS tens
+    CROSS JOIN (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) AS hundreds
+) AS seq ON seq.n <= rt.total_count;
 
 -- 示例价格策略
-INSERT INTO room_price_strategy (hotel_id, room_type_id, strategy_type, start_date, end_date, price_adjust, discount_rate, min_stay_days)
+INSERT INTO room_price_strategy (hotel_id, room_type_id, strategy_type, start_date, end_date, price_adjust, discount_rate, vip_level, min_stay_days)
 VALUES
-    (1, (SELECT id FROM room_type WHERE name = '星河城市景观房' LIMIT 1), 2, CURDATE(), CURDATE() + INTERVAL 30 DAY, NULL, 0.92, 1),
-    (1, (SELECT id FROM room_type WHERE name = '星河行政大床房' LIMIT 1), 1, CURDATE() + INTERVAL 5 DAY, CURDATE() + INTERVAL 12 DAY, 180.00, NULL, 1),
-    (2, (SELECT id FROM room_type WHERE name = '海天亲子乐园房' LIMIT 1), 3, CURDATE() + INTERVAL 14 DAY, CURDATE() + INTERVAL 45 DAY, NULL, 0.88, 2),
-    (3, (SELECT id FROM room_type WHERE name = '云栖温泉大床房' LIMIT 1), 1, CURDATE() + INTERVAL 20 DAY, CURDATE() + INTERVAL 35 DAY, -120.00, NULL, 1);
+    (1, (SELECT id FROM room_type WHERE name = '星河城市景观房' LIMIT 1), 2, CURDATE(), CURDATE() + INTERVAL 30 DAY, NULL, 0.92, 1, 1),
+    (1, (SELECT id FROM room_type WHERE name = '星河行政大床房' LIMIT 1), 1, CURDATE() + INTERVAL 5 DAY, CURDATE() + INTERVAL 12 DAY, 180.00, NULL, NULL, 1),
+    (2, (SELECT id FROM room_type WHERE name = '海天亲子乐园房' LIMIT 1), 3, CURDATE() + INTERVAL 14 DAY, CURDATE() + INTERVAL 45 DAY, NULL, 0.88, NULL, 2),
+    (3, (SELECT id FROM room_type WHERE name = '云栖温泉大床房' LIMIT 1), 1, CURDATE() + INTERVAL 20 DAY, CURDATE() + INTERVAL 35 DAY, -120.00, NULL, NULL, 1);
 
 -- 示例维护记录
 INSERT INTO room_maintenance (room_id, maintenance_type, description, start_time, end_time, operator, status)
@@ -369,81 +544,1026 @@ VALUES
     );
 
 -- 示例订单
-INSERT INTO bookings (hotel_id, room_type_id, room_id, user_id, start_time, end_time, status, guests, amount, currency, contact_name, contact_phone, remark)
+INSERT INTO bookings (hotel_id, room_type_id, room_id, user_id, start_time, end_time, status, guests, amount,
+                      original_amount, discount_amount, payable_amount, paid_amount, discount_rate,
+                      payment_status, payment_method, payment_channel,
+                      currency, contact_name, contact_phone, remark)
 VALUES
     (
         1,
         (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1),
         (SELECT id FROM users WHERE username = 'alice'),
         CURDATE() + INTERVAL 3 DAY + INTERVAL 15 HOUR,
         CURDATE() + INTERVAL 5 DAY + INTERVAL 12 HOUR,
         'CONFIRMED',
         2,
+        1079.20,
         1136.00,
+        56.80,
+        1079.20,
+        1079.20,
+        0.95,
+        'PAID',
+        'WALLET',
+        'WALLET',
         'CNY',
         'Alice',
         '13800000001',
         '高楼层需求'
     ),
     (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
+        (SELECT id FROM users WHERE username = 'alice'),
+        CURDATE() - INTERVAL 12 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 9 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        2,
+        1333.80,
+        1404.00,
+        70.20,
+        1333.80,
+        1333.80,
+        0.95,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Alice',
+        '13800000001',
+        '已完成入住体验'
+    ),
+    (
         2,
         (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) LIMIT 1),
-        (SELECT id FROM users WHERE username = 'diana'),
-        CURDATE() + INTERVAL 10 DAY + INTERVAL 15 HOUR,
-        CURDATE() + INTERVAL 13 DAY + INTERVAL 12 HOUR,
-        'PENDING',
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 3),
+        (SELECT id FROM users WHERE username = 'alice'),
+        CURDATE() + INTERVAL 25 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 28 DAY + INTERVAL 12 HOUR,
+        'CANCELLED',
         3,
+        1981.44,
         2064.00,
+        82.56,
+        1981.44,
+        0.00,
+        0.96,
+        'UNPAID',
+        'WALLET',
+        'WALLET',
         'CNY',
-        'Diana',
-        '13800000004',
-        '需要儿童床护栏'
+        'Alice',
+        '13800000001',
+        '用户取消行程'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河家庭套房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河家庭套房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1),
+        (SELECT id FROM users WHERE username = 'bob'),
+        CURDATE() + INTERVAL 5 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 7 DAY + INTERVAL 12 HOUR,
+        'PENDING_PAYMENT',
+        4,
+        2376.00,
+        2376.00,
+        0.00,
+        2376.00,
+        0.00,
+        1.00,
+        'UNPAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Bob',
+        '13800000002',
+        '等待支付尾款'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1),
+        (SELECT id FROM users WHERE username = 'bob'),
+        CURDATE() - INTERVAL 40 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 37 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        4,
+        2576.00,
+        2576.00,
+        0.00,
+        2576.00,
+        2576.00,
+        1.00,
+        'PAID',
+        'DIRECT',
+        'ARRIVAL',
+        'CNY',
+        'Bob',
+        '13800000002',
+        '朋友聚会，评价良好'
     ),
     (
         2,
         (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) LIMIT 1 OFFSET 2),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 1),
+        (SELECT id FROM users WHERE username = 'bob'),
+        CURDATE() - INTERVAL 20 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 18 DAY + INTERVAL 12 HOUR,
+        'CANCELLED',
+        2,
+        1656.00,
+        1656.00,
+        0.00,
+        1656.00,
+        0.00,
+        1.00,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Bob',
+        '13800000002',
+        '过期未付款自动取消'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
         (SELECT id FROM users WHERE username = 'charlie'),
         CURDATE() - INTERVAL 1 DAY + INTERVAL 15 HOUR,
         CURDATE() + INTERVAL 1 DAY + INTERVAL 12 HOUR,
         'CHECKED_IN',
         2,
+        1473.84,
         1656.00,
+        182.16,
+        1473.84,
+        1473.84,
+        0.89,
+        'PAID',
+        'WALLET',
+        'WALLET',
         'CNY',
         'Charlie',
         '13800000003',
         '安排延迟退房'
     ),
     (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1),
+        (SELECT id FROM users WHERE username = 'charlie'),
+        CURDATE() - INTERVAL 30 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 27 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        2,
+        3611.52,
+        4104.00,
+        492.48,
+        3611.52,
+        3611.52,
+        0.88,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Charlie',
+        '13800000003',
+        '周年纪念入住'
+    ),
+    (
         3,
         (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 3),
+        (SELECT id FROM users WHERE username = 'charlie'),
+        CURDATE() + INTERVAL 12 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 14 DAY + INTERVAL 12 HOUR,
+        'REFUNDED',
+        2,
+        1796.40,
+        1996.00,
+        199.60,
+        1796.40,
+        0.00,
+        0.90,
+        'REFUNDED',
+        'ONLINE',
+        'VISA',
+        'CNY',
+        'Charlie',
+        '13800000003',
+        '已办理全额退款'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1),
+        (SELECT id FROM users WHERE username = 'diana'),
+        CURDATE() + INTERVAL 10 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 13 DAY + INTERVAL 12 HOUR,
+        'PENDING',
+        3,
+        1981.44,
+        2064.00,
+        82.56,
+        1981.44,
+        0.00,
+        0.96,
+        'UNPAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Diana',
+        '13800000004',
+        '需要儿童床护栏'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
+        (SELECT id FROM users WHERE username = 'diana'),
+        CURDATE() + INTERVAL 1 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 3 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        2,
+        1079.20,
+        1136.00,
+        56.80,
+        1079.20,
+        1079.20,
+        0.95,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Diana',
+        '13800000004',
+        '提前安排婴儿床'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1),
+        (SELECT id FROM users WHERE username = 'diana'),
+        CURDATE() + INTERVAL 18 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 21 DAY + INTERVAL 12 HOUR,
+        'PENDING_CONFIRMATION',
+        2,
+        4430.52,
+        4764.00,
+        333.48,
+        4430.52,
+        0.00,
+        0.93,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Diana',
+        '13800000004',
+        '等待酒店确认禅修名额'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1),
         (SELECT id FROM users WHERE username = 'leo'),
         CURDATE() + INTERVAL 20 DAY + INTERVAL 15 HOUR,
         CURDATE() + INTERVAL 23 DAY + INTERVAL 12 HOUR,
         'PENDING',
         2,
+        2604.78,
         2994.00,
+        389.22,
+        2604.78,
+        0.00,
+        0.87,
+        'UNPAID',
+        'DIRECT',
+        'MANUAL',
         'CNY',
         'Leo',
         '13700000005',
         '预订禅修课程'
     ),
     (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
+        (SELECT id FROM users WHERE username = 'leo'),
+        CURDATE() + INTERVAL 2 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 12 HOUR,
+        'CHECKED_IN',
+        3,
+        2325.60,
+        2736.00,
+        410.40,
+        2325.60,
+        2325.60,
+        0.85,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Leo',
+        '13700000005',
+        '已安排夜宵送达'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 1),
+        (SELECT id FROM users WHERE username = 'leo'),
+        CURDATE() - INTERVAL 15 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 13 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        2,
+        2699.60,
+        3176.00,
+        476.40,
+        2699.60,
+        2699.60,
+        0.85,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Leo',
+        '13700000005',
+        '体验禅修课程'
+    ),
+    (
         3,
         (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1),
-        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) LIMIT 1 OFFSET 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 1),
         (SELECT id FROM users WHERE username = 'mia'),
         CURDATE() + INTERVAL 2 DAY + INTERVAL 14 HOUR,
         CURDATE() + INTERVAL 4 DAY + INTERVAL 11 HOUR,
         'CONFIRMED',
         4,
-        3864.00,
+        2292.64,
+        2576.00,
+        283.36,
+        2292.64,
+        2292.64,
+        0.89,
+        'PAID',
+        'WALLET',
+        'WALLET',
         'CNY',
         'Mia',
         '13700000006',
         '需安排烧烤食材'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 5),
+        (SELECT id FROM users WHERE username = 'mia'),
+        CURDATE() - INTERVAL 8 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 6 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        2,
+        870.48,
+        936.00,
+        65.52,
+        870.48,
+        870.48,
+        0.93,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Mia',
+        '13700000006',
+        '城市慢游打卡'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 5),
+        (SELECT id FROM users WHERE username = 'mia'),
+        CURDATE() + INTERVAL 7 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 10 DAY + INTERVAL 12 HOUR,
+        'REFUNDED',
+        3,
+        1878.24,
+        2064.00,
+        185.76,
+        1878.24,
+        0.00,
+        0.91,
+        'REFUNDED',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Mia',
+        '13700000006',
+        '行程调整已退款'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 7),
+        (SELECT id FROM users WHERE username = 'nina'),
+        CURDATE() + INTERVAL 6 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 8 DAY + INTERVAL 12 HOUR,
+        'PENDING',
+        1,
+        936.00,
+        936.00,
+        0.00,
+        936.00,
+        0.00,
+        1.00,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Nina',
+        '13600000007',
+        '首次入住体验'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 5),
+        (SELECT id FROM users WHERE username = 'nina'),
+        CURDATE() - INTERVAL 5 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 3 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        1,
+        1996.00,
+        1996.00,
+        0.00,
+        1996.00,
+        1996.00,
+        1.00,
+        'PAID',
+        'DIRECT',
+        'ARRIVAL',
+        'CNY',
+        'Nina',
+        '13600000007',
+        '温泉度假放松'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 3),
+        (SELECT id FROM users WHERE username = 'oscar'),
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 6 DAY + INTERVAL 12 HOUR,
+        'PENDING_PAYMENT',
+        2,
+        1556.64,
+        1656.00,
+        99.36,
+        1556.64,
+        0.00,
+        0.94,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Oscar',
+        '13600000008',
+        '等待企业审批付款'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 6),
+        (SELECT id FROM users WHERE username = 'oscar'),
+        CURDATE() - INTERVAL 3 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 1 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        3,
+        1320.96,
+        1376.00,
+        55.04,
+        1320.96,
+        1320.96,
+        0.96,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Oscar',
+        '13600000008',
+        '家庭周末出游'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 4),
+        (SELECT id FROM users WHERE username = 'paul'),
+        CURDATE() + INTERVAL 9 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 11 DAY + INTERVAL 12 HOUR,
+        'PENDING_CONFIRMATION',
+        2,
+        1022.40,
+        1136.00,
+        113.60,
+        1022.40,
+        0.00,
+        0.90,
+        'UNPAID',
+        'ONLINE',
+        'VISA',
+        'CNY',
+        'Paul',
+        '13600000009',
+        '等待公司审批'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
+        (SELECT id FROM users WHERE username = 'paul'),
+        CURDATE() - INTERVAL 18 DAY + INTERVAL 15 HOUR,
+        CURDATE() - INTERVAL 15 DAY + INTERVAL 12 HOUR,
+        'CHECKED_OUT',
+        3,
+        3438.96,
+        3864.00,
+        425.04,
+        3438.96,
+        3438.96,
+        0.89,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Paul',
+        '13600000009',
+        '团队团建活动'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
+        (SELECT id FROM users WHERE username = 'quinn'),
+        CURDATE() + INTERVAL 3 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 5 DAY + INTERVAL 12 HOUR,
+        'CHECKED_IN',
+        2,
+        2699.60,
+        3176.00,
+        476.40,
+        2699.60,
+        2699.60,
+        0.85,
+        'PAID',
+        'DIRECT',
+        'MANUAL',
+        'CNY',
+        'Quinn',
+        '13600000010',
+        '贵宾沙龙参会'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 3),
+        (SELECT id FROM users WHERE username = 'quinn'),
+        CURDATE() + INTERVAL 14 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 17 DAY + INTERVAL 12 HOUR,
+        'REFUNDED',
+        3,
+        3488.40,
+        4104.00,
+        615.60,
+        3488.40,
+        0.00,
+        0.85,
+        'REFUNDED',
+        'ONLINE',
+        'VISA',
+        'CNY',
+        'Quinn',
+        '13600000010',
+        '改期至明年'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 4),
+        (SELECT id FROM users WHERE username = 'rachel'),
+        CURDATE() + INTERVAL 8 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 10 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        2,
+        2243.52,
+        2736.00,
+        492.48,
+        2243.52,
+        2243.52,
+        0.82,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Rachel',
+        '13600000011',
+        '享受钻石专属礼遇'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖禅意套房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 3),
+        (SELECT id FROM users WHERE username = 'rachel'),
+        CURDATE() + INTERVAL 26 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 29 DAY + INTERVAL 12 HOUR,
+        'PENDING',
+        2,
+        4001.76,
+        4764.00,
+        762.24,
+        4001.76,
+        0.00,
+        0.84,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Rachel',
+        '13600000011',
+        '待确认私人禅修导师'
     );
+
+INSERT INTO bookings (hotel_id, room_type_id, room_id, user_id, start_time, end_time, status, guests, amount,
+                      original_amount, discount_amount, payable_amount, paid_amount, discount_rate,
+                      payment_status, payment_method, payment_channel,
+                      currency, contact_name, contact_phone, remark)
+VALUES
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 5),
+        (SELECT id FROM users WHERE username = 'alice'),
+        CURDATE() + INTERVAL 2 DAY + INTERVAL 13 HOUR,
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 11 HOUR,
+        'CONFIRMED',
+        2,
+        1045.12,
+        1136.00,
+        90.88,
+        1045.12,
+        1045.12,
+        0.92,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Alice',
+        '13800000001',
+        '补订行政礼遇房'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河行政大床房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 6),
+        (SELECT id FROM users WHERE username = 'bob'),
+        CURDATE() + INTERVAL 6 DAY + INTERVAL 16 HOUR,
+        CURDATE() + INTERVAL 9 DAY + INTERVAL 11 HOUR,
+        'PENDING_CONFIRMATION',
+        2,
+        1618.80,
+        1704.00,
+        85.20,
+        1618.80,
+        0.00,
+        0.95,
+        'UNPAID',
+        'ONLINE',
+        'ALIPAY',
+        'CNY',
+        'Bob',
+        '13800000002',
+        '等待审批确认'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河家庭套房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河家庭套房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 1),
+        (SELECT id FROM users WHERE username = 'charlie'),
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 14 HOUR,
+        CURDATE() + INTERVAL 7 DAY + INTERVAL 11 HOUR,
+        'CONFIRMED',
+        4,
+        2138.40,
+        2376.00,
+        237.60,
+        2138.40,
+        2138.40,
+        0.90,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Charlie',
+        '13800000003',
+        '家庭出游预订'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河家庭套房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河家庭套房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 2),
+        (SELECT id FROM users WHERE username = 'nina'),
+        CURDATE() + INTERVAL 1 DAY + INTERVAL 12 HOUR,
+        CURDATE() + INTERVAL 3 DAY + INTERVAL 10 HOUR,
+        'CHECKED_IN',
+        4,
+        1140.48,
+        1188.00,
+        47.52,
+        1140.48,
+        1140.48,
+        0.96,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Nina',
+        '13600000007',
+        '亲子入住进行中'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 8),
+        (SELECT id FROM users WHERE username = 'oscar'),
+        CURDATE() + INTERVAL 5 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 7 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        2,
+        842.40,
+        936.00,
+        93.60,
+        842.40,
+        842.40,
+        0.90,
+        'PAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Oscar',
+        '13600000008',
+        '景观房锁定高层'
+    ),
+    (
+        1,
+        (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '星河城市景观房' AND hotel_id = 1 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 9),
+        (SELECT id FROM users WHERE username = 'paul'),
+        CURDATE() + INTERVAL 10 DAY + INTERVAL 17 HOUR,
+        CURDATE() + INTERVAL 13 DAY + INTERVAL 11 HOUR,
+        'PENDING_CONFIRMATION',
+        2,
+        1333.80,
+        1404.00,
+        70.20,
+        1333.80,
+        0.00,
+        0.95,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Paul',
+        '13600000009',
+        '等待差旅审批'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 4),
+        (SELECT id FROM users WHERE username = 'quinn'),
+        CURDATE() + INTERVAL 2 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 5 DAY + INTERVAL 12 HOUR,
+        'CHECKED_IN',
+        2,
+        1457.28,
+        1656.00,
+        198.72,
+        1457.28,
+        1457.28,
+        0.88,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Quinn',
+        '13600000010',
+        '已办理入住'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天无边海景房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 5),
+        (SELECT id FROM users WHERE username = 'rachel'),
+        CURDATE() + INTERVAL 11 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 14 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        2,
+        2111.40,
+        2484.00,
+        372.60,
+        2111.40,
+        2111.40,
+        0.85,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Rachel',
+        '13600000011',
+        '安排晚安甜点'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 7),
+        (SELECT id FROM users WHERE username = 'diana'),
+        CURDATE() + INTERVAL 3 DAY + INTERVAL 14 HOUR,
+        CURDATE() + INTERVAL 6 DAY + INTERVAL 11 HOUR,
+        'CONFIRMED',
+        3,
+        1238.40,
+        1376.00,
+        137.60,
+        1238.40,
+        1238.40,
+        0.90,
+        'PAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Diana',
+        '13800000004',
+        '亲子活动预约成功'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天亲子乐园房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 8),
+        (SELECT id FROM users WHERE username = 'mia'),
+        CURDATE() + INTERVAL 8 DAY + INTERVAL 16 HOUR,
+        CURDATE() + INTERVAL 10 DAY + INTERVAL 12 HOUR,
+        'PENDING_PAYMENT',
+        4,
+        1307.20,
+        1376.00,
+        68.80,
+        1307.20,
+        0.00,
+        0.95,
+        'UNPAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Mia',
+        '13700000006',
+        '待补齐尾款'
+    ),
+    (
+        2,
+        (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '海天尊享套房' AND hotel_id = 2 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 1),
+        (SELECT id FROM users WHERE username = 'leo'),
+        CURDATE() + INTERVAL 1 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 3 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        2,
+        2407.68,
+        2736.00,
+        328.32,
+        2407.68,
+        2407.68,
+        0.88,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Leo',
+        '13700000005',
+        '预留私人管家服务'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 6),
+        (SELECT id FROM users WHERE username = 'alice'),
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 6 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        2,
+        1796.40,
+        1996.00,
+        199.60,
+        1796.40,
+        1796.40,
+        0.90,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Alice',
+        '13800000001',
+        '温泉体验预约'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 3),
+        (SELECT id FROM users WHERE username = 'bob'),
+        CURDATE() + INTERVAL 2 DAY + INTERVAL 14 HOUR,
+        CURDATE() + INTERVAL 4 DAY + INTERVAL 12 HOUR,
+        'CHECKED_IN',
+        4,
+        2318.40,
+        2576.00,
+        257.60,
+        2318.40,
+        2318.40,
+        0.90,
+        'PAID',
+        'DIRECT',
+        'ARRIVAL',
+        'CNY',
+        'Bob',
+        '13800000002',
+        '木屋体验入住中'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖森林木屋' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 4),
+        (SELECT id FROM users WHERE username = 'paul'),
+        CURDATE() + INTERVAL 9 DAY + INTERVAL 15 HOUR,
+        CURDATE() + INTERVAL 12 DAY + INTERVAL 12 HOUR,
+        'CONFIRMED',
+        3,
+        3554.88,
+        3864.00,
+        309.12,
+        3554.88,
+        3554.88,
+        0.92,
+        'PAID',
+        'WALLET',
+        'WALLET',
+        'CNY',
+        'Paul',
+        '13600000009',
+        '团队秋游包栋'
+    ),
+    (
+        3,
+        (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1),
+        (SELECT id FROM room WHERE room_type_id = (SELECT id FROM room_type WHERE name = '云栖温泉大床房' AND hotel_id = 3 LIMIT 1) ORDER BY room_number LIMIT 1 OFFSET 7),
+        (SELECT id FROM users WHERE username = 'quinn'),
+        CURDATE() + INTERVAL 7 DAY + INTERVAL 16 HOUR,
+        CURDATE() + INTERVAL 9 DAY + INTERVAL 12 HOUR,
+        'PENDING_CONFIRMATION',
+        2,
+        1856.28,
+        1996.00,
+        139.72,
+        1856.28,
+        0.00,
+        0.93,
+        'UNPAID',
+        'ONLINE',
+        'WECHAT',
+        'CNY',
+        'Quinn',
+        '13600000010',
+        '等待温泉时段确认'
+    );
+
+-- 根据示例订单与维护记录同步房间状态与房型可用库存
+UPDATE room r
+SET status = CASE
+                 WHEN EXISTS (SELECT 1 FROM room_maintenance m WHERE m.room_id = r.id AND m.status = 1) THEN 5
+                 WHEN EXISTS (SELECT 1 FROM bookings b WHERE b.room_id = r.id AND b.status = 'CHECKED_IN') THEN 3
+                 WHEN EXISTS (SELECT 1 FROM bookings b WHERE b.room_id = r.id AND b.status IN ('PENDING','PENDING_CONFIRMATION','PENDING_PAYMENT','CONFIRMED')) THEN 2
+                 ELSE 1
+             END;
+
+UPDATE room r
+SET last_checkout_time = (
+    SELECT MAX(b.end_time)
+    FROM bookings b
+    WHERE b.room_id = r.id AND b.status = 'CHECKED_OUT'
+)
+WHERE EXISTS (SELECT 1 FROM bookings b WHERE b.room_id = r.id AND b.status = 'CHECKED_OUT');
+
+UPDATE room_type rt
+SET available_count = (
+    SELECT COUNT(*) FROM room r WHERE r.room_type_id = rt.id AND r.status = 1
+);
 

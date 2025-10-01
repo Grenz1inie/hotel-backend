@@ -27,8 +27,9 @@ public class AuthInterceptor implements HandlerInterceptor {
         if (path.startsWith("/api/auth/login") || path.startsWith("/api/health")) {
             return true;
         }
-        // Allow public browsing of rooms related resources
-        if (HttpMethod.GET.matches(request.getMethod()) && (path.startsWith("/api/rooms") || path.startsWith("/api/hotel"))) {
+        // Allow public browsing endpoints, attach user context if token exists
+        if (HttpMethod.GET.matches(request.getMethod()) && (path.startsWith("/api/rooms") || path.startsWith("/api/hotel") || path.startsWith("/api/pricing"))) {
+            attachUserIfPresent(request);
             return true;
         }
         // Allow preflight
@@ -41,12 +42,7 @@ public class AuthInterceptor implements HandlerInterceptor {
         }
         String token = auth.substring(7);
         try {
-            JwtUtil.JwtPayload payload = jwtUtil.parse(token);
-            Long userId = Long.valueOf(payload.sub);
-            String username = payload.username;
-            String role = payload.role;
-            Integer vipLevel = payload.vipLevel;
-            CurrentUserHolder.set(new AuthUser(userId, username, role, vipLevel));
+            CurrentUserHolder.set(parseToken(token));
             return true;
         } catch (Exception e) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Token 无效或已过期");
@@ -57,5 +53,27 @@ public class AuthInterceptor implements HandlerInterceptor {
     public void afterCompletion(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response,
                                 @NonNull Object handler, @Nullable Exception ex) {
         CurrentUserHolder.clear();
+    }
+
+    private void attachUserIfPresent(HttpServletRequest request) {
+        String auth = request.getHeader("Authorization");
+        if (auth == null || !auth.startsWith("Bearer ")) {
+            return;
+        }
+        String token = auth.substring(7);
+        try {
+            CurrentUserHolder.set(parseToken(token));
+        } catch (Exception ignored) {
+            // ignore invalid token for public endpoints
+        }
+    }
+
+    private AuthUser parseToken(String token) {
+        JwtUtil.JwtPayload payload = jwtUtil.parse(token);
+        Long userId = Long.valueOf(payload.sub);
+        String username = payload.username;
+        String role = payload.role;
+        Integer vipLevel = payload.vipLevel;
+        return new AuthUser(userId, username, role, vipLevel);
     }
 }
