@@ -5,10 +5,12 @@ import com.hyj.hotelbackend.dto.analytics.VacancyAnalyticsResponse;
 import com.hyj.hotelbackend.entity.Booking;
 import com.hyj.hotelbackend.entity.Room;
 import com.hyj.hotelbackend.entity.RoomInstance;
+import com.hyj.hotelbackend.entity.VacancyStatistics;
 import com.hyj.hotelbackend.service.AnalyticsService;
 import com.hyj.hotelbackend.service.BookingService;
 import com.hyj.hotelbackend.service.RoomInstanceService;
 import com.hyj.hotelbackend.service.RoomService;
+import com.hyj.hotelbackend.service.VacancyStatisticsService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
@@ -37,6 +39,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
     private final BookingService bookingService;
     private final RoomService roomService;
     private final RoomInstanceService roomInstanceService;
+    private final VacancyStatisticsService vacancyStatisticsService;
 
     private enum Granularity {
         HOUR, DAY;
@@ -181,46 +184,124 @@ public class AnalyticsServiceImpl implements AnalyticsService {
                                     List<VacancyAnalyticsResponse.ThresholdAlert> alertsOut,
                                     InventorySnapshot snapshot) {
         List<VacancyAnalyticsResponse.VacancyPoint> points = new ArrayList<>();
-    int totalRooms = snapshot != null ? snapshot.totalRooms() : (room.getTotalCount() == null ? 0 : room.getTotalCount());
-    if (totalRooms <= 0) {
+        int totalRooms = snapshot != null ? snapshot.totalRooms() : (room.getTotalCount() == null ? 0 : room.getTotalCount());
+        if (totalRooms <= 0) {
             return points;
         }
-    int availableRooms = snapshot != null ? snapshot.availableRooms() : (room.getAvailableCount() == null ? totalRooms : room.getAvailableCount());
-    availableRooms = Math.min(availableRooms, totalRooms);
-    int baselineOccupied = Math.max(0, totalRooms - availableRooms);
-    LocalDateTime cursor = start;
-    while (!cursor.isAfter(end)) {
-        final LocalDateTime slotStart = cursor;
-    LocalDateTime slotEnd = slotStart.plus(granularity.stepAmount(), granularity.unit());
+        
+        // 尝试从数据库读取历史统计数据
+        LocalDate today = LocalDate.now();
+        LocalDate startDate = start.toLocalDate();
+        LocalDate endDate = end.toLocalDate();
+        
+        // 对于历史数据（今天之前），优先从数据库读取
+        Map<String, VacancyStatistics> statsMap = new HashMap<>();
+        if (startDate.isBefore(today)) {
+            LocalDate historyEndDate = endDate.isBefore(today) ? endDate : today.minusDays(1);
+            List<VacancyStatistics> historyStats = vacancyStatisticsService.queryStatistics(
+                    java.util.Collections.singletonList(room.getId()),
+                    startDate,
+                    historyEndDate,
+                    granularity == Granularity.HOUR
+            );
+            
+            // 构建缓存Map，key = "date_hour" 或 "date" (全天统计)
+            for (VacancyStatistics stat : historyStats) {
+                String key = stat.getStatDate().toString();
+                if (stat.getStatHour() != null) {
+                    key += "_" + stat.getStatHour();
+                }
+                statsMap.put(key, stat);
+            }
+        }
+    
+        // 计算可售房间数 = 总数 - 维护中 - 锁定
+        int maintenanceRooms = snapshot != null ? snapshot.maintenanceRooms() : 0;
+        int lockedRooms = snapshot != null ? snapshot.lockedRooms() : 0;
+        int sellableRooms = totalRooms - maintenanceRooms - lockedRooms;
+        sellableRooms = Math.max(0, sellableRooms);
+        
+        int availableRooms = snapshot != null ? snapshot.availableRooms() : (room.getAvailableCount() == null ? sellableRooms : room.getAvailableCount());
+        availableRooms = Math.min(availableRooms, sellableRooms);
+        
+        // 只对"当前时间之后"的时间点使用 baselineOccupied
+        LocalDateTime now = LocalDateTime.now();
+        int baselineOccupied = Math.max(0, sellableRooms - availableRooms);
+        
+        LocalDateTime cursor = start;
+        while (!cursor.isAfter(end)) {
+            final LocalDateTime slotStart = cursor;
+            LocalDateTime slotEnd = slotStart.plus(granularity.stepAmount(), granularity.unit());
             VacancyAnalyticsResponse.VacancyPoint point = new VacancyAnalyticsResponse.VacancyPoint();
-        point.setTimestamp(slotStart);
+            point.setTimestamp(slotStart);
+            
+            // 尝试从缓存的统计数据中读取
+            String cacheKey = slotStart.toLocalDate().toString();
+            if (granularity == Granularity.HOUR) {
+                cacheKey += "_" + slotStart.getHour();
+            }
+            
+            VacancyStatistics cachedStat = statsMap.get(cacheKey);
+            
+            if (cachedStat != null && slotStart.toLocalDate().isBefore(today)) {
+                // 使用数据库中的历史数据
+                point.setVacancyCount(cachedStat.getVacancyCount().doubleValue());
+                point.setVacancyRate(round(cachedStat.getVacancyRate().doubleValue()));
+                point.setBookingRate(round(cachedStat.getBookingRate().doubleValue()));
+                point.setAveragePrice(cachedStat.getAveragePrice());
+                point.setPriceStrategy(calculatePriceStrategy(cachedStat.getAveragePrice(), room.getPricePerNight()));
+                
+                // 状态和来源分类需要实时计算（或者后续也可以存到数据库）
+                List<Booking> overlapping = roomBookings.stream()
+                        .filter(b -> isActiveStatus(b.getStatus()))
+                        .filter(b -> overlaps(b.getStartTime(), b.getEndTime(), slotStart, slotEnd))
+                        .collect(Collectors.toList());
+                point.setStatusBreakdown(buildStatusBreakdown(overlapping));
+                point.setSourceBreakdown(buildSourceBreakdown(overlapping));
+                
+                // 评估预警
+                evaluateAlert(room, slotStart, slotEnd, cachedStat.getVacancyRate().doubleValue(), 
+                             thresholdHigh, thresholdLow, alertsOut);
+            } else {
+                // 实时计算（今天及未来的数据）
+                List<Booking> overlapping = roomBookings.stream()
+                        .filter(b -> isActiveStatus(b.getStatus()))
+                        .filter(b -> overlaps(b.getStartTime(), b.getEndTime(), slotStart, slotEnd))
+                        .collect(Collectors.toList());
 
-            List<Booking> overlapping = roomBookings.stream()
-                    .filter(b -> isActiveStatus(b.getStatus()))
-            .filter(b -> overlaps(b.getStartTime(), b.getEndTime(), slotStart, slotEnd))
-                    .collect(Collectors.toList());
+                // 计算实际占用的房间数
+                long bookingsWithRoomId = overlapping.stream()
+                        .map(Booking::getRoomId)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .count();
+                long bookingsWithoutRoomId = overlapping.stream()
+                        .filter(b -> b.getRoomId() == null)
+                        .count();
+                int bookingOccupancy = (int) (bookingsWithRoomId + bookingsWithoutRoomId);
+                
+                int occupied;
+                if (slotStart.isBefore(now)) {
+                    occupied = bookingOccupancy;
+                } else {
+                    occupied = Math.max(baselineOccupied, bookingOccupancy);
+                }
+                occupied = Math.min(occupied, sellableRooms);
+                
+                double vacancyCount = Math.max(sellableRooms - occupied, 0);
+                double vacancyRate = sellableRooms == 0 ? 0d : vacancyCount / sellableRooms;
+                double bookingRate = sellableRooms == 0 ? 0d : Math.min(occupied / (double) sellableRooms, 1d);
 
-        int bookingOccupancy = overlapping.isEmpty() ? 0 : Math.max(
-            (int) overlapping.stream()
-                .map(Booking::getRoomId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet()).size(),
-            overlapping.size());
-        int occupied = Math.max(baselineOccupied, bookingOccupancy);
-        occupied = Math.min(occupied, totalRooms);
-        double vacancyCount = Math.max(totalRooms - occupied, 0);
-        double vacancyRate = totalRooms == 0 ? 0d : vacancyCount / totalRooms;
-        double bookingRate = totalRooms == 0 ? 0d : Math.min(occupied / (double) totalRooms, 1d);
+                point.setVacancyCount(vacancyCount);
+                point.setVacancyRate(round(vacancyRate));
+                point.setBookingRate(round(bookingRate));
+                point.setAveragePrice(calculateAveragePrice(overlapping));
+                point.setPriceStrategy(calculatePriceStrategy(point.getAveragePrice(), room.getPricePerNight()));
+                point.setStatusBreakdown(buildStatusBreakdown(overlapping));
+                point.setSourceBreakdown(buildSourceBreakdown(overlapping));
 
-            point.setVacancyCount(vacancyCount);
-            point.setVacancyRate(round(vacancyRate));
-            point.setBookingRate(round(bookingRate));
-            point.setAveragePrice(calculateAveragePrice(overlapping));
-            point.setPriceStrategy(calculatePriceStrategy(point.getAveragePrice(), room.getPricePerNight()));
-            point.setStatusBreakdown(buildStatusBreakdown(overlapping));
-            point.setSourceBreakdown(buildSourceBreakdown(overlapping));
-
-            evaluateAlert(room, slotStart, slotEnd, vacancyRate, thresholdHigh, thresholdLow, alertsOut);
+                evaluateAlert(room, slotStart, slotEnd, vacancyRate, thresholdHigh, thresholdLow, alertsOut);
+            }
 
             points.add(point);
             cursor = slotEnd;
@@ -333,10 +414,13 @@ public class AnalyticsServiceImpl implements AnalyticsService {
                                double thresholdHigh,
                                double thresholdLow,
                                List<VacancyAnalyticsResponse.ThresholdAlert> alertsOut) {
-        if (vacancyRate >= thresholdHigh) {
+        // 只在空置率真正超出阈值时才触发警告
+        // HIGH: 空置率 > 阈值（不包括等于）
+        // LOW: 空置率 < 阈值（不包括等于）
+        if (vacancyRate > thresholdHigh) {
             alertsOut.add(buildAlert(room, slotStart, slotEnd, "HIGH", thresholdHigh, vacancyRate,
                     "空置率高于阈值"));
-        } else if (vacancyRate <= thresholdLow) {
+        } else if (vacancyRate < thresholdLow) {
             alertsOut.add(buildAlert(room, slotStart, slotEnd, "LOW", thresholdLow, vacancyRate,
                     "空置率低于阈值"));
         }
@@ -365,9 +449,14 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         List<VacancyAnalyticsResponse.EventMarker> events = new ArrayList<>();
         List<EventSeed> seeds = defaultEventSeeds();
         for (EventSeed seed : seeds) {
-            if (!seed.date.isBefore(start.toLocalDate()) && !seed.date.isAfter(end.toLocalDate())) {
+            // 检查事件区间是否与查询区间有交集
+            boolean overlaps = !seed.endDate.isBefore(start.toLocalDate()) && 
+                             !seed.startDate.isAfter(end.toLocalDate());
+            
+            if (overlaps) {
                 VacancyAnalyticsResponse.EventMarker marker = new VacancyAnalyticsResponse.EventMarker();
-                marker.setTimestamp(seed.date.atStartOfDay());
+                marker.setTimestamp(seed.startDate.atStartOfDay());
+                marker.setEndTimestamp(seed.endDate.atTime(23, 59, 59)); // 设置结束时间为当天最后一刻
                 marker.setTitle(seed.title);
                 marker.setDescription(seed.description);
                 marker.setCategory(seed.category);
@@ -380,10 +469,65 @@ public class AnalyticsServiceImpl implements AnalyticsService {
     private List<EventSeed> defaultEventSeeds() {
         List<EventSeed> seeds = new ArrayList<>();
         LocalDate now = LocalDate.now();
-        seeds.add(new EventSeed(now.withMonth(10).withDayOfMonth(1), "国庆黄金周", "旅客高峰，建议提前备房", "节假日"));
-        seeds.add(new EventSeed(now.withMonth(5).withDayOfMonth(1), "五一假期", "短途旅行热，关注家庭房型", "节假日"));
-        seeds.add(new EventSeed(now.withMonth(11).withDayOfMonth(11), "双十一营销", "线上促销活动", "促销"));
-        seeds.add(new EventSeed(now.withMonth(3).withDayOfMonth(18), "春季家装展", "商旅客人集中", "展会"));
+        
+        // 多天节假日（开始日期 -> 结束日期）
+        seeds.add(new EventSeed(
+            now.withMonth(10).withDayOfMonth(1), 
+            now.withMonth(10).withDayOfMonth(7), 
+            "国庆黄金周", 
+            "旅客高峰，建议提前备房", 
+            "节假日"
+        ));
+        
+        seeds.add(new EventSeed(
+            now.withMonth(5).withDayOfMonth(1), 
+            now.withMonth(5).withDayOfMonth(5), 
+            "五一假期", 
+            "短途旅行热，关注家庭房型", 
+            "节假日"
+        ));
+        
+        seeds.add(new EventSeed(
+            now.withMonth(1).withDayOfMonth(1), 
+            now.withMonth(1).withDayOfMonth(3), 
+            "元旦假期", 
+            "新年出游，酒店预订高峰", 
+            "节假日"
+        ));
+        
+        seeds.add(new EventSeed(
+            now.withMonth(6).withDayOfMonth(10), 
+            now.withMonth(6).withDayOfMonth(12), 
+            "端午假期", 
+            "家庭旅游热门时段", 
+            "节假日"
+        ));
+        
+        seeds.add(new EventSeed(
+            now.withMonth(9).withDayOfMonth(15), 
+            now.withMonth(9).withDayOfMonth(17), 
+            "中秋假期", 
+            "团圆出游，酒店需求旺盛", 
+            "节假日"
+        ));
+        
+        // 单天活动事件
+        seeds.add(new EventSeed(
+            now.withMonth(11).withDayOfMonth(11), 
+            now.withMonth(11).withDayOfMonth(11), 
+            "双十一营销", 
+            "线上促销活动", 
+            "促销"
+        ));
+        
+        seeds.add(new EventSeed(
+            now.withMonth(3).withDayOfMonth(18), 
+            now.withMonth(3).withDayOfMonth(20), 
+            "春季家装展", 
+            "商旅客人集中", 
+            "展会"
+        ));
+        
         return seeds;
     }
 
@@ -399,35 +543,148 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         if (CollectionUtils.isEmpty(actualPoints)) {
             return result;
         }
-        int window = Math.min(3, actualPoints.size());
-        double avgVacancy = actualPoints.subList(Math.max(actualPoints.size() - window, 0), actualPoints.size()).stream()
-                .mapToDouble(VacancyAnalyticsResponse.VacancyPoint::getVacancyRate)
-                .average()
-                .orElse(0.0);
-        double avgBooking = actualPoints.subList(Math.max(actualPoints.size() - window, 0), actualPoints.size()).stream()
-                .mapToDouble(VacancyAnalyticsResponse.VacancyPoint::getBookingRate)
-                .average()
-                .orElse(0.0);
-        double avgCount = actualPoints.subList(Math.max(actualPoints.size() - window, 0), actualPoints.size()).stream()
-                .mapToDouble(VacancyAnalyticsResponse.VacancyPoint::getVacancyCount)
-                .average()
-                .orElse(room.getTotalCount());
-
+        
+        // 使用更多历史数据点来计算趋势（最多取最后10个点）
+        int window = Math.min(10, actualPoints.size());
+        List<VacancyAnalyticsResponse.VacancyPoint> recentPoints = actualPoints.subList(
+            Math.max(actualPoints.size() - window, 0), 
+            actualPoints.size()
+        );
+        
+        // 计算线性趋势（使用简单线性回归）
+        double[] vacancyTrend = calculateLinearTrend(recentPoints, VacancyAnalyticsResponse.VacancyPoint::getVacancyRate);
+        
+        // 计算基准值（使用最近几个点的平均值，而不是最后一个点）
+        double baseVacancy = recentPoints.stream()
+            .mapToDouble(VacancyAnalyticsResponse.VacancyPoint::getVacancyRate)
+            .average()
+            .orElse(0.5);
+        
+        // 添加随机波动因子（模拟真实场景的不确定性）
+        double volatility = calculateVolatility(recentPoints, VacancyAnalyticsResponse.VacancyPoint::getVacancyRate);
+        volatility = Math.max(0.03, volatility); // 至少保持3%的波动率
+        
+        // 趋势衰减因子：越远期的预测，趋势影响越小
+        double trendDecayRate = 0.95;
+        
         LocalDateTime cursor = actualPoints.get(actualPoints.size() - 1).getTimestamp()
-                .plus(granularity.stepAmount(), granularity.unit());
+            .plus(granularity.stepAmount(), granularity.unit());
+        
         for (int i = 0; i < horizon; i++) {
             VacancyAnalyticsResponse.VacancyPoint point = new VacancyAnalyticsResponse.VacancyPoint();
             point.setTimestamp(cursor);
             point.setForecast(true);
-            point.setVacancyRate(round(avgVacancy));
-            point.setBookingRate(round(avgBooking));
-            point.setVacancyCount(round(avgCount));
+            
+            // 趋势调整：随着时间推移逐渐衰减
+            double trendWeight = Math.pow(trendDecayRate, i);
+            double trendAdjustment = (vacancyTrend[0] * (i + 1)) * trendWeight;
+            
+            // 周期性因子（模拟周末效应和月度周期）
+            double periodicFactor = 1.0;
+            if (granularity == Granularity.DAY) {
+                int dayOfWeek = cursor.getDayOfWeek().getValue();
+                // 周五(5)、周六(6)、周日(7) 预订率更高，空置率更低
+                if (dayOfWeek >= 5 && dayOfWeek <= 7) {
+                    periodicFactor = 0.80; // 周末空置率降低20%
+                } else if (dayOfWeek <= 2) {
+                    periodicFactor = 1.15; // 周初空置率略高15%
+                } else {
+                    periodicFactor = 1.05; // 周中略高5%
+                }
+            }
+            
+            // 多频率波动：结合快速波动和慢速波动
+            double fastWave = Math.sin(i * 0.8) * 0.15;  // 快速波动，幅度±15%
+            double slowWave = Math.cos(i * 0.3) * 0.08;  // 慢速波动，幅度±8%
+            double mediumWave = Math.sin(i * 0.5 + 1.2) * 0.10; // 中速波动，幅度±10%
+            
+            // 叠加波动，使用波动率作为振幅系数
+            double waveFactor = 1.0 + (fastWave + slowWave + mediumWave) * (volatility / 0.1);
+            
+            // 均值回归：远期预测逐渐回归到历史平均值
+            double historicalMean = recentPoints.stream()
+                .mapToDouble(VacancyAnalyticsResponse.VacancyPoint::getVacancyRate)
+                .average()
+                .orElse(0.5);
+            double meanReversionWeight = Math.min(0.3, i * 0.02); // 逐步增加均值回归权重
+            
+            // 计算预测值
+            double forecastVacancy = baseVacancy + trendAdjustment;
+            forecastVacancy = forecastVacancy * periodicFactor * waveFactor;
+            
+            // 应用均值回归
+            forecastVacancy = forecastVacancy * (1 - meanReversionWeight) + historicalMean * meanReversionWeight;
+            
+            // 限制在合理范围[0.1, 0.9]，避免极端值
+            forecastVacancy = Math.max(0.10, Math.min(0.90, forecastVacancy));
+            
+            double forecastBooking = 1.0 - forecastVacancy;
+            forecastBooking = Math.max(0.10, Math.min(0.90, forecastBooking));
+            
+            int totalRooms = room.getTotalCount() != null ? room.getTotalCount() : 0;
+            double forecastCount = totalRooms * forecastVacancy;
+            
+            point.setVacancyRate(round(forecastVacancy));
+            point.setBookingRate(round(forecastBooking));
+            point.setVacancyCount(round(forecastCount));
             point.setAveragePrice(BigDecimal.ZERO);
             point.setPriceStrategy("预测");
             result.add(point);
             cursor = cursor.plus(granularity.stepAmount(), granularity.unit());
         }
         return result;
+    }
+    
+    /**
+     * 计算线性趋势：返回 [slope, intercept]
+     * 使用简单线性回归: y = slope * x + intercept
+     */
+    private double[] calculateLinearTrend(List<VacancyAnalyticsResponse.VacancyPoint> points, 
+                                          java.util.function.ToDoubleFunction<VacancyAnalyticsResponse.VacancyPoint> valueExtractor) {
+        if (points.size() < 2) {
+            return new double[]{0.0, 0.0};
+        }
+        
+        int n = points.size();
+        double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+        
+        for (int i = 0; i < n; i++) {
+            double x = i; // 时间索引
+            double y = valueExtractor.applyAsDouble(points.get(i));
+            sumX += x;
+            sumY += y;
+            sumXY += x * y;
+            sumX2 += x * x;
+        }
+        
+        double denominator = n * sumX2 - sumX * sumX;
+        if (Math.abs(denominator) < 1e-10) {
+            return new double[]{0.0, sumY / n};
+        }
+        
+        double slope = (n * sumXY - sumX * sumY) / denominator;
+        double intercept = (sumY - slope * sumX) / n;
+        
+        return new double[]{slope, intercept};
+    }
+    
+    /**
+     * 计算波动率（标准差）
+     */
+    private double calculateVolatility(List<VacancyAnalyticsResponse.VacancyPoint> points,
+                                       java.util.function.ToDoubleFunction<VacancyAnalyticsResponse.VacancyPoint> valueExtractor) {
+        if (points.size() < 2) {
+            return 0.05; // 默认5%波动率
+        }
+        
+        double mean = points.stream().mapToDouble(valueExtractor).average().orElse(0.0);
+        double variance = points.stream()
+            .mapToDouble(valueExtractor)
+            .map(v -> Math.pow(v - mean, 2))
+            .average()
+            .orElse(0.0);
+        
+        return Math.sqrt(variance);
     }
 
     private List<Room> resolveRooms(List<Long> roomTypeIds) {
@@ -458,7 +715,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         return now.toLocalDate().atStartOfDay();
     }
 
-    private record EventSeed(LocalDate date, String title, String description, String category) {
+    private record EventSeed(LocalDate startDate, LocalDate endDate, String title, String description, String category) {
     }
 
     private static final class InventoryAccumulator {

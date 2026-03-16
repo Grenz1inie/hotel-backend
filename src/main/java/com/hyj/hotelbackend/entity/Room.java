@@ -1,5 +1,6 @@
 package com.hyj.hotelbackend.entity;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -13,6 +14,8 @@ public class Room {
     private Long id;
     private String name;
     private String type;
+    @TableField("theme_color")
+    private String themeColor;
     private Integer totalCount;
     private Integer availableCount;
     private BigDecimal pricePerNight;

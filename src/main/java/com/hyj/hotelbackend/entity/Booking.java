@@ -31,7 +31,7 @@ public class Booking {
 
     @TableField("end_time")
     private LocalDateTime endTime;
-    private String status; // PENDING, PENDING_CONFIRMATION, PENDING_PAYMENT, CONFIRMED, CHECKED_IN, CHECKED_OUT, CANCELLED
+    private String status; // PENDING, PENDING_CONFIRMATION, PENDING_PAYMENT, CONFIRMED, CHECKED_IN, CHECKED_OUT, CANCELLED, REFUND_REQUESTED, REFUNDED
 
     @TableField("guests")
     private Integer guests;
@@ -79,6 +79,21 @@ public class Booking {
     private String contactPhone;
 
     private String remark;
+
+    @TableField("refund_reason")
+    private String refundReason;
+
+    @TableField("refund_requested_at")
+    private LocalDateTime refundRequestedAt;
+
+    @TableField("refund_approved_at")
+    private LocalDateTime refundApprovedAt;
+
+    @TableField("refund_rejected_at")
+    private LocalDateTime refundRejectedAt;
+
+    @TableField("refund_approved_by")
+    private Long refundApprovedBy;
 
     @TableField("created_at")
     private LocalDateTime createdAt;

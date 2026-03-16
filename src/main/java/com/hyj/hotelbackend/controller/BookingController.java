@@ -90,6 +90,10 @@ public class BookingController {
         if ("CHECKED_IN".equals(b.getStatus()) || "CHECKED_OUT".equals(b.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该状态不允许取消");
         }
+        // 检查是否已支付
+        if ("PAID".equals(b.getPaymentStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "已支付订单请使用退款申请");
+        }
         if (!"CANCELLED".equals(b.getStatus())) {
             String previousStatus = b.getStatus();
             b.setStatus("CANCELLED");
@@ -97,6 +101,87 @@ public class BookingController {
             bookingService.updateById(b);
             restoreAvailabilityIfNeeded(b, previousStatus);
         }
+        return b;
+    }
+
+    // PUT /api/bookings/{id}/request-refund - 用户申请退款
+    @PutMapping("/bookings/{id}/request-refund")
+    public Booking requestRefund(@PathVariable Long id, @RequestParam(required = false) String reason) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "未登录");
+        Booking b = bookingService.getById(id);
+        if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        boolean isOwner = Objects.equals(me.getId(), b.getUserId());
+        boolean isAdmin = me.getRole() != null && me.getRole().equals("ADMIN");
+        if (!isOwner && !isAdmin) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "无权申请退款");
+        }
+        // 必须是已支付状态
+        if (!"PAID".equals(b.getPaymentStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "仅已支付订单可申请退款");
+        }
+        // 只有已退房状态不允许申请退款（已完成服务）
+        if ("CHECKED_OUT".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "已退房订单不允许申请退款");
+        }
+        // 已取消或已退款的订单不能重复申请
+        if ("CANCELLED".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "已取消订单不能申请退款");
+        }
+        // 不能重复申请
+        if ("REFUND_REQUESTED".equals(b.getStatus()) || "REFUNDED".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "退款申请已存在或已完成");
+        }
+        b.setStatus("REFUND_REQUESTED");
+        b.setRefundReason(reason);
+        b.setRefundRequestedAt(LocalDateTime.now());
+        bookingService.updateById(b);
+        return b;
+    }
+
+    // PUT /api/bookings/{id}/approve-refund - 管理员批准退款
+    @PutMapping("/bookings/{id}/approve-refund")
+    public Booking approveRefund(@PathVariable Long id) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null || me.getRole() == null || !me.getRole().equals("ADMIN")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
+        }
+        Booking b = bookingService.getById(id);
+        if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        if (!"REFUND_REQUESTED".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "订单未处于退款申请状态");
+        }
+        String previousStatus = b.getStatus();
+        b.setStatus("REFUNDED");
+        b.setRefundApprovedAt(LocalDateTime.now());
+        b.setRefundApprovedBy(me.getId());
+        handleRefundIfNecessary(b, "管理员批准退款");
+        bookingService.updateById(b);
+        restoreAvailabilityIfNeeded(b, previousStatus);
+        return b;
+    }
+
+    // PUT /api/bookings/{id}/reject-refund - 管理员拒绝退款
+    @PutMapping("/bookings/{id}/reject-refund")
+    public Booking rejectRefund(@PathVariable Long id, @RequestParam(required = false) String reason) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null || me.getRole() == null || !me.getRole().equals("ADMIN")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
+        }
+        Booking b = bookingService.getById(id);
+        if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
+        if (!"REFUND_REQUESTED".equals(b.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "订单未处于退款申请状态");
+        }
+        // 恢复到之前的确认状态
+        b.setStatus("CONFIRMED");
+        b.setRefundRejectedAt(LocalDateTime.now());
+        b.setRefundApprovedBy(me.getId());
+        if (reason != null && !reason.isBlank()) {
+            String existingRemark = b.getRemark() == null ? "" : b.getRemark();
+            b.setRemark(existingRemark + (existingRemark.isEmpty() ? "" : "; ") + "退款被拒: " + reason);
+        }
+        bookingService.updateById(b);
         return b;
     }
 
@@ -113,7 +198,7 @@ public class BookingController {
         return b;
     }
 
-    // 管理员分页筛选订单：status、userId、roomId、时间段重叠过滤
+    // 管理员分页筛选订单：status、userId、roomId、bookingId、时间段重叠过滤
     @GetMapping("/bookings")
     public PageResponse<Booking> adminList(@RequestParam(defaultValue = "1") long page,
                                            @RequestParam(defaultValue = "10") long size,
@@ -122,15 +207,18 @@ public class BookingController {
                                            @RequestParam(required = false) Long roomId,
                                            @RequestParam(required = false) Long roomTypeId,
                                            @RequestParam(required = false) Long hotelId,
+                                           @RequestParam(required = false) Long bookingId,
                                            @RequestParam(required = false) String contactPhone,
                                            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime start,
-                                           @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end) {
+                                           @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end,
+                                           @RequestParam(required = false, defaultValue = "status") String sortBy) {
         AuthUser me = CurrentUserHolder.get();
         if (me == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "未登录");
         if (me.getRole() == null || !me.getRole().equals("ADMIN")) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可查看全部订单");
         }
     LambdaQueryWrapper<Booking> qw = new LambdaQueryWrapper<>();
+        if (bookingId != null) qw.eq(Booking::getId, bookingId);
         if (status != null && !status.isBlank()) qw.eq(Booking::getStatus, status);
         if (userId != null) qw.eq(Booking::getUserId, userId);
         if (roomId != null) qw.eq(Booking::getRoomId, roomId);
@@ -143,16 +231,25 @@ public class BookingController {
             if (!start.isBefore(end)) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "开始时间必须早于结束时间");
             qw.lt(Booking::getStartTime, end).gt(Booking::getEndTime, start);
     }
-    qw.last(" ORDER BY CASE status " +
-        "WHEN 'PENDING' THEN 1 " +
-        "WHEN 'PENDING_CONFIRMATION' THEN 2 " +
-        "WHEN 'PENDING_PAYMENT' THEN 3 " +
-        "WHEN 'CONFIRMED' THEN 4 " +
-        "WHEN 'CHECKED_IN' THEN 5 " +
-        "WHEN 'CHECKED_OUT' THEN 6 " +
-        "WHEN 'CANCELLED' THEN 7 " +
-        "WHEN 'REFUNDED' THEN 8 " +
-        "ELSE 99 END, start_time DESC, id DESC");
+    
+    // 根据sortBy参数决定排序方式
+    if ("time".equalsIgnoreCase(sortBy)) {
+        // 按创建时间降序（最新的在前）
+        qw.orderByDesc(Booking::getCreatedAt);
+    } else {
+        // 默认按状态优先级分组排序
+        qw.last(" ORDER BY CASE status " +
+            "WHEN 'PENDING' THEN 1 " +
+            "WHEN 'PENDING_CONFIRMATION' THEN 2 " +
+            "WHEN 'PENDING_PAYMENT' THEN 3 " +
+            "WHEN 'CONFIRMED' THEN 4 " +
+            "WHEN 'CHECKED_IN' THEN 5 " +
+            "WHEN 'CHECKED_OUT' THEN 6 " +
+            "WHEN 'CANCELLED' THEN 7 " +
+            "WHEN 'REFUNDED' THEN 8 " +
+            "ELSE 99 END, start_time DESC, id DESC");
+    }
+    
     Page<Booking> p = bookingService.page(new Page<>(page, size), qw);
         return PageResponse.of(p.getRecords(), p.getCurrent(), p.getSize(), p.getTotal());
     }

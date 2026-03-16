@@ -16,4 +16,14 @@ public interface WalletService {
     WalletTransaction refund(Long userId, BigDecimal amount, String channel, Long bookingId, String remark);
 
     List<WalletTransaction> recentTransactions(Long userId, int limit);
+
+    /**
+     * 获取用户年度累计消费金额
+     */
+    BigDecimal getYearlyConsumption(Long userId);
+
+    /**
+     * 检查并更新用户VIP等级（基于年度累计消费）
+     */
+    void checkAndUpgradeVipLevel(Long userId);
 }

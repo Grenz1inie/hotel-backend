@@ -43,6 +43,7 @@ public class VacancyAnalyticsResponse {
     @Data
     public static class EventMarker {
         private LocalDateTime timestamp;
+        private LocalDateTime endTimestamp; // 新增：结束时间
         private String title;
         private String description;
         private String category;
