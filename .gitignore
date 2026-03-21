@@ -4,6 +4,33 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### Environment ###
+.env
+.env.*
+!.env.example
+
+### Logs ###
+logs/
+*.log
+*.out
+*.err
+
+### OS / Temp ###
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.temp
+*~
+
+### Runtime / JVM Dumps ###
+*.pid
+*.seed
+*.stackdump
+*.hprof
+hs_err_pid*
+replay_pid*
+
 ### STS ###
 .apt_generated
 .classpath
