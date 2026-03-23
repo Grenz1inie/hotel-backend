@@ -1,10 +1,10 @@
-package com.hyj.hotelbackend.service.impl;
+package com.group.hotelbackend.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.hyj.hotelbackend.entity.Hotel;
-import com.hyj.hotelbackend.mapper.HotelMapper;
-import com.hyj.hotelbackend.service.HotelService;
+import com.group.hotelbackend.entity.Hotel;
+import com.group.hotelbackend.mapper.HotelMapper;
+import com.group.hotelbackend.service.HotelService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -22,6 +22,9 @@ public class HotelServiceImpl extends ServiceImpl<HotelMapper, Hotel> implements
                 return hotel;
             }
         }
-        return getOne(new LambdaQueryWrapper<Hotel>().orderByAsc(Hotel::getId).last("LIMIT 1"));
+        // Oracle 11g 使用 ROWNUM 限制返回一条记录
+        return getOne(new LambdaQueryWrapper<Hotel>()
+                .orderByAsc(Hotel::getId)
+                .apply("ROWNUM = 1"));
     }
 }
