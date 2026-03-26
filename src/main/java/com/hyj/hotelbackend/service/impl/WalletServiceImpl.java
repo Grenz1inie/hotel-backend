@@ -1,16 +1,16 @@
-package com.group.hotelbackend.service.impl;
+package com.hyj.hotelbackend.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.group.hotelbackend.entity.PaymentRecord;
-import com.group.hotelbackend.entity.User;
-import com.group.hotelbackend.entity.WalletAccount;
-import com.group.hotelbackend.entity.WalletTransaction;
-import com.group.hotelbackend.mapper.PaymentRecordMapper;
-import com.group.hotelbackend.mapper.UserMapper;
-import com.group.hotelbackend.mapper.WalletAccountMapper;
-import com.group.hotelbackend.mapper.WalletTransactionMapper;
-import com.group.hotelbackend.service.WalletService;
+import com.hyj.hotelbackend.entity.PaymentRecord;
+import com.hyj.hotelbackend.entity.User;
+import com.hyj.hotelbackend.entity.WalletAccount;
+import com.hyj.hotelbackend.entity.WalletTransaction;
+import com.hyj.hotelbackend.mapper.PaymentRecordMapper;
+import com.hyj.hotelbackend.mapper.UserMapper;
+import com.hyj.hotelbackend.mapper.WalletAccountMapper;
+import com.hyj.hotelbackend.mapper.WalletTransactionMapper;
+import com.hyj.hotelbackend.service.WalletService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;

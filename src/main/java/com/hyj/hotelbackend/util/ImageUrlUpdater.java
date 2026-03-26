@@ -1,4 +1,4 @@
-package com.group.hotelbackend.util;
+package com.hyj.hotelbackend.util;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;

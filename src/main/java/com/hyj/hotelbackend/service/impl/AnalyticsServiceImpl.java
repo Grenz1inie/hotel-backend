@@ -386,8 +386,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         Map<String, Integer> map = new HashMap<>();
         for (Booking booking : bookings) {
             String key = booking.getStatus() == null ? "UNKNOWN" : booking.getStatus().toUpperCase(Locale.ROOT);
-            map.merge(key, 1, Integer::sum);
-        }
+            map.merge(key, 1, (a, b) -> a + b);        }
         return map;
     }
 
@@ -402,7 +401,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
                     source = "企业协议";
                 }
             }
-            map.merge(source, 1, Integer::sum);
+            map.merge(source, 1, (a, b) -> a + b);
         }
         return map;
     }

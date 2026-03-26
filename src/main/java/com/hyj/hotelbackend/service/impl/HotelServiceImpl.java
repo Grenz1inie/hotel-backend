@@ -1,10 +1,10 @@
-package com.group.hotelbackend.service.impl;
+package com.hyj.hotelbackend.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.group.hotelbackend.entity.Hotel;
-import com.group.hotelbackend.mapper.HotelMapper;
-import com.group.hotelbackend.service.HotelService;
+import com.hyj.hotelbackend.entity.Hotel;
+import com.hyj.hotelbackend.mapper.HotelMapper;
+import com.hyj.hotelbackend.service.HotelService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
