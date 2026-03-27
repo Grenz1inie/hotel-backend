@@ -1,6 +1,7 @@
 package com.hyj.hotelbackend.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hyj.hotelbackend.entity.PaymentRecord;
 import com.hyj.hotelbackend.entity.User;
 import com.hyj.hotelbackend.entity.WalletAccount;
@@ -95,7 +96,7 @@ public class WalletServiceImpl implements WalletService {
         walletAccountMapper.updateById(account);
         WalletTransaction tx = buildTransaction(account, userId, amount, newBalance, "PAYMENT", "OUT", channel, null, remark, bookingId);
         walletTransactionMapper.insert(tx);
-        
+
         // 消费后立即更新累计消费金额并检查VIP升级
         try {
             User user = userMapper.selectById(userId);
@@ -104,23 +105,23 @@ public class WalletServiceImpl implements WalletService {
                 BigDecimal currentConsumption = user.getTotalConsumption() != null ? user.getTotalConsumption() : BigDecimal.ZERO;
                 BigDecimal newConsumption = currentConsumption.add(amount);
                 user.setTotalConsumption(newConsumption);
-                
+
                 // 根据累计消费金额更新VIP等级
                 int oldLevel = user.getVipLevel() != null ? user.getVipLevel() : 0;
                 int newLevel = calculateVipLevel(newConsumption);
-                
+
                 if (newLevel != oldLevel) {
                     user.setVipLevel(newLevel);
                     System.out.println("用户 " + userId + " VIP等级已从 " + oldLevel + " 升级到 " + newLevel + "（累计消费：" + newConsumption + "）");
                 }
-                
+
                 userMapper.updateById(user);
             }
         } catch (Exception e) {
             System.err.println("更新累计消费和VIP等级失败: " + e.getMessage());
             e.printStackTrace();
         }
-        
+
         return tx;
     }
 
@@ -138,7 +139,7 @@ public class WalletServiceImpl implements WalletService {
         walletAccountMapper.updateById(account);
         WalletTransaction tx = buildTransaction(account, userId, amount, newBalance, "REFUND", "IN", channel, null, remark, bookingId);
         walletTransactionMapper.insert(tx);
-        
+
         // 退款后减少累计消费金额并重新计算VIP等级
         try {
             User user = userMapper.selectById(userId);
@@ -151,23 +152,23 @@ public class WalletServiceImpl implements WalletService {
                     newConsumption = BigDecimal.ZERO;
                 }
                 user.setTotalConsumption(newConsumption);
-                
+
                 // 根据新的累计消费金额重新计算VIP等级（可能降级）
                 int oldLevel = user.getVipLevel() != null ? user.getVipLevel() : 0;
                 int newLevel = calculateVipLevel(newConsumption);
-                
+
                 if (newLevel != oldLevel) {
                     user.setVipLevel(newLevel);
                     System.out.println("用户 " + userId + " VIP等级已从 " + oldLevel + " 调整到 " + newLevel + "（退款后累计消费：" + newConsumption + "）");
                 }
-                
+
                 userMapper.updateById(user);
             }
         } catch (Exception e) {
             System.err.println("更新累计消费和VIP等级失败: " + e.getMessage());
             e.printStackTrace();
         }
-        
+
         return tx;
     }
 
@@ -175,10 +176,13 @@ public class WalletServiceImpl implements WalletService {
     public List<WalletTransaction> recentTransactions(Long userId, int limit) {
         Assert.notNull(userId, "userId 必填");
         int pageSize = limit <= 0 ? 10 : Math.min(limit, 200);
-        return walletTransactionMapper.selectList(new LambdaQueryWrapper<WalletTransaction>()
-                .eq(WalletTransaction::getUserId, userId)
-                .orderByDesc(WalletTransaction::getCreatedAt)
-                .last("LIMIT " + pageSize));
+        // 使用 MyBatis Plus 分页，自动适配 Oracle 11g（需配置分页插件）
+        Page<WalletTransaction> page = new Page<>(1, pageSize);
+        Page<WalletTransaction> result = walletTransactionMapper.selectPage(page,
+                new LambdaQueryWrapper<WalletTransaction>()
+                        .eq(WalletTransaction::getUserId, userId)
+                        .orderByDesc(WalletTransaction::getCreatedAt));
+        return result.getRecords();
     }
 
     private WalletTransaction buildTransaction(WalletAccount account,
@@ -213,13 +217,13 @@ public class WalletServiceImpl implements WalletService {
     @Override
     public BigDecimal getYearlyConsumption(Long userId) {
         Assert.notNull(userId, "userId 必填");
-        
+
         // 获取本年度1月1日的开始时间
         LocalDateTime yearStart = LocalDateTime.now().withMonth(1).withDayOfMonth(1)
                 .withHour(0).withMinute(0).withSecond(0).withNano(0);
-        
+
         BigDecimal total = BigDecimal.ZERO;
-        
+
         // 1. 查询本年度所有钱包消费记录（type=PAYMENT, direction=OUT）
         List<WalletTransaction> walletTransactions = walletTransactionMapper.selectList(
                 new LambdaQueryWrapper<WalletTransaction>()
@@ -228,14 +232,14 @@ public class WalletServiceImpl implements WalletService {
                         .eq(WalletTransaction::getDirection, "OUT")
                         .ge(WalletTransaction::getCreatedAt, yearStart)
         );
-        
+
         // 累加钱包消费金额
         for (WalletTransaction tx : walletTransactions) {
             if (tx.getAmount() != null) {
                 total = total.add(tx.getAmount());
             }
         }
-        
+
         // 2. 查询本年度所有其他支付方式的消费记录（payment_record表，status=PAID）
         List<PaymentRecord> paymentRecords = paymentRecordMapper.selectList(
                 new LambdaQueryWrapper<PaymentRecord>()
@@ -243,14 +247,14 @@ public class WalletServiceImpl implements WalletService {
                         .eq(PaymentRecord::getStatus, "PAID")
                         .ge(PaymentRecord::getCreatedAt, yearStart)
         );
-        
+
         // 累加其他支付方式的消费金额
         for (PaymentRecord record : paymentRecords) {
             if (record.getAmount() != null) {
                 total = total.add(record.getAmount());
             }
         }
-        
+
         return total;
     }
 
@@ -258,20 +262,20 @@ public class WalletServiceImpl implements WalletService {
     @Transactional
     public void checkAndUpgradeVipLevel(Long userId) {
         Assert.notNull(userId, "userId 必填");
-        
+
         // 获取用户当前信息
         User user = userMapper.selectById(userId);
         if (user == null) {
             return;
         }
-        
+
         // 使用用户的累计消费金额字段
         BigDecimal totalConsumption = user.getTotalConsumption() != null ? user.getTotalConsumption() : BigDecimal.ZERO;
-        
+
         // 根据累计消费计算应有的VIP等级
         int currentLevel = user.getVipLevel() != null ? user.getVipLevel() : 0;
         int newLevel = calculateVipLevel(totalConsumption);
-        
+
         // 如果等级有变化，更新用户VIP等级
         if (newLevel != currentLevel) {
             user.setVipLevel(newLevel);
@@ -279,7 +283,7 @@ public class WalletServiceImpl implements WalletService {
             System.out.println("用户 " + userId + " VIP等级已从 " + currentLevel + " 调整到 " + newLevel + "（累计消费：" + totalConsumption + "）");
         }
     }
-    
+
     /**
      * 根据累计消费金额计算VIP等级
      */
@@ -287,7 +291,7 @@ public class WalletServiceImpl implements WalletService {
         if (totalConsumption == null) {
             return 0;
         }
-        
+
         if (totalConsumption.compareTo(new BigDecimal("50000")) >= 0) {
             return 4; // 钻石会员
         } else if (totalConsumption.compareTo(new BigDecimal("30000")) >= 0) {
@@ -301,4 +305,3 @@ public class WalletServiceImpl implements WalletService {
         }
     }
 }
-

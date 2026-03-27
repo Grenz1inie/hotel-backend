@@ -217,7 +217,7 @@ public class BookingController {
         if (me.getRole() == null || !me.getRole().equals("ADMIN")) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可查看全部订单");
         }
-    LambdaQueryWrapper<Booking> qw = new LambdaQueryWrapper<>();
+        LambdaQueryWrapper<Booking> qw = new LambdaQueryWrapper<>();
         if (bookingId != null) qw.eq(Booking::getId, bookingId);
         if (status != null && !status.isBlank()) qw.eq(Booking::getStatus, status);
         if (userId != null) qw.eq(Booking::getUserId, userId);
@@ -230,27 +230,27 @@ public class BookingController {
         if (start != null && end != null) {
             if (!start.isBefore(end)) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "开始时间必须早于结束时间");
             qw.lt(Booking::getStartTime, end).gt(Booking::getEndTime, start);
-    }
-    
-    // 根据sortBy参数决定排序方式
-    if ("time".equalsIgnoreCase(sortBy)) {
-        // 按创建时间降序（最新的在前）
-        qw.orderByDesc(Booking::getCreatedAt);
-    } else {
-        // 默认按状态优先级分组排序
-        qw.last(" ORDER BY CASE status " +
-            "WHEN 'PENDING' THEN 1 " +
-            "WHEN 'PENDING_CONFIRMATION' THEN 2 " +
-            "WHEN 'PENDING_PAYMENT' THEN 3 " +
-            "WHEN 'CONFIRMED' THEN 4 " +
-            "WHEN 'CHECKED_IN' THEN 5 " +
-            "WHEN 'CHECKED_OUT' THEN 6 " +
-            "WHEN 'CANCELLED' THEN 7 " +
-            "WHEN 'REFUNDED' THEN 8 " +
-            "ELSE 99 END, start_time DESC, id DESC");
-    }
-    
-    Page<Booking> p = bookingService.page(new Page<>(page, size), qw);
+        }
+
+        // 根据sortBy参数决定排序方式
+        if ("time".equalsIgnoreCase(sortBy)) {
+            // 按创建时间降序（最新的在前）
+            qw.orderByDesc(Booking::getCreatedAt);
+        } else {
+            // 默认按状态优先级分组排序（CASE WHEN 语法 Oracle 支持）
+            qw.last(" ORDER BY CASE status " +
+                    "WHEN 'PENDING' THEN 1 " +
+                    "WHEN 'PENDING_CONFIRMATION' THEN 2 " +
+                    "WHEN 'PENDING_PAYMENT' THEN 3 " +
+                    "WHEN 'CONFIRMED' THEN 4 " +
+                    "WHEN 'CHECKED_IN' THEN 5 " +
+                    "WHEN 'CHECKED_OUT' THEN 6 " +
+                    "WHEN 'CANCELLED' THEN 7 " +
+                    "WHEN 'REFUNDED' THEN 8 " +
+                    "ELSE 99 END, start_time DESC, id DESC");
+        }
+
+        Page<Booking> p = bookingService.page(new Page<>(page, size), qw);
         return PageResponse.of(p.getRecords(), p.getCurrent(), p.getSize(), p.getTotal());
     }
 
@@ -272,15 +272,15 @@ public class BookingController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该状态不允许改期");
         }
         // 重叠校验：排除自身
-    long overlapping = bookingService.count(new LambdaQueryWrapper<Booking>()
-        .eq(Booking::getRoomTypeId, b.getRoomTypeId())
+        long overlapping = bookingService.count(new LambdaQueryWrapper<Booking>()
+                .eq(Booking::getRoomTypeId, b.getRoomTypeId())
                 .ne(Booking::getStatus, "CHECKED_OUT")
                 .ne(Booking::getStatus, "CANCELLED")
                 .ne(Booking::getId, id)
                 .lt(Booking::getStartTime, end)
                 .gt(Booking::getEndTime, start)
         );
-    Room r = roomService.getById(b.getRoomTypeId());
+        Room r = roomService.getById(b.getRoomTypeId());
         if (r == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在");
         if (overlapping >= r.getTotalCount()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "库存不足或时间段冲突");
@@ -345,7 +345,7 @@ public class BookingController {
         String previousStatus = b.getStatus();
         b.setStatus("CHECKED_OUT");
         bookingService.updateById(b);
-    restoreAvailabilityIfNeeded(b, previousStatus);
+        restoreAvailabilityIfNeeded(b, previousStatus);
         return b;
     }
 
@@ -361,7 +361,7 @@ public class BookingController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "当前状态不支持拒绝");
         }
         String previousStatus = b.getStatus();
-    restoreAvailabilityIfNeeded(b, previousStatus);
+        restoreAvailabilityIfNeeded(b, previousStatus);
         b.setStatus("CANCELLED");
         handleRefundIfNecessary(b, "管理员拒绝订单");
         bookingService.updateById(b);
@@ -377,7 +377,7 @@ public class BookingController {
         Booking b = bookingService.getById(id);
         if (b == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "预订不存在");
         handleRefundIfNecessary(b, "管理员删除订单");
-    restoreAvailabilityIfNeeded(b, b.getStatus());
+        restoreAvailabilityIfNeeded(b, b.getStatus());
         bookingService.removeById(id);
         return b;
     }

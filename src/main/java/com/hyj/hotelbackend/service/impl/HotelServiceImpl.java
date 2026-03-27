@@ -22,6 +22,9 @@ public class HotelServiceImpl extends ServiceImpl<HotelMapper, Hotel> implements
                 return hotel;
             }
         }
-        return getOne(new LambdaQueryWrapper<Hotel>().orderByAsc(Hotel::getId).last("LIMIT 1"));
+        // Oracle 11g 使用 ROWNUM 限制返回一条记录
+        return getOne(new LambdaQueryWrapper<Hotel>()
+                .orderByAsc(Hotel::getId)
+                .apply("ROWNUM = 1"));
     }
 }
