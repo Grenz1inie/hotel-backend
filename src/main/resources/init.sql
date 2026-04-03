@@ -1,4 +1,3 @@
--- 清理已存在的表（Oracle 不支持 IF EXISTS，若表不存在会报错，请根据环境处理）
 DROP TABLE vacancy_statistics CASCADE CONSTRAINTS PURGE;
 DROP TABLE vip_level_policy CASCADE CONSTRAINTS PURGE;
 DROP TABLE wallet_transaction CASCADE CONSTRAINTS PURGE;
@@ -24,6 +23,7 @@ DROP SEQUENCE seq_bookings;
 DROP SEQUENCE seq_wallet_account;
 DROP SEQUENCE seq_wallet_transaction;
 DROP SEQUENCE seq_payment_record;
+DROP SEQUENCE seq_vacancy_statistics;
 
 -- 创建表 hotel
 CREATE TABLE hotel (
@@ -405,7 +405,7 @@ COMMENT ON TABLE payment_record IS 'Direct Payment Record';
 
 CREATE INDEX idx_payment_record_user ON payment_record(user_id, id);
 
--- 序列定义（与 insert.sql 保持一致）
+-- 序列定义
 CREATE SEQUENCE seq_hotel START WITH 1 INCREMENT BY 1;
 CREATE SEQUENCE seq_users START WITH 1 INCREMENT BY 1;
 CREATE SEQUENCE seq_room_type START WITH 1 INCREMENT BY 1;
@@ -417,6 +417,7 @@ CREATE SEQUENCE seq_bookings START WITH 1 INCREMENT BY 1;
 CREATE SEQUENCE seq_wallet_account START WITH 1 INCREMENT BY 1;
 CREATE SEQUENCE seq_wallet_transaction START WITH 1 INCREMENT BY 1;
 CREATE SEQUENCE seq_payment_record START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE seq_vacancy_statistics START WITH 1 INCREMENT BY 1;
 
 -- 酒店数据
 INSERT INTO hotel (id, name, address, city, phone, star_level, status, introduction, hero_image_url, gallery_images)
@@ -1303,8 +1304,8 @@ SET available_count = (
 
 COMMIT;
 
--- 1. Views -----------------------------------------------------------------
--- 1.1 Hotel room type availability overview view
+-- 视图 -----------------------------------------------------------------
+-- 酒店房型可用性概览视图
 CREATE OR REPLACE VIEW hotel_user.v_hotel_room_availability AS
 SELECT
     h.id AS hotel_id,
@@ -1321,7 +1322,7 @@ JOIN hotel_user.room_type rt ON rt.hotel_id = h.id
 WHERE rt.is_active = 1;
 COMMENT ON TABLE hotel_user.v_hotel_room_availability IS 'Hotel Room Type Availability Overview View';
 
--- 1.2 User VIP member information view (with level benefits)
+-- 用户VIP会员信息视图（含等级权益）
 CREATE OR REPLACE VIEW hotel_user.v_user_vip_info AS
 SELECT
     u.id AS user_id,
@@ -1336,7 +1337,7 @@ FROM hotel_user.users u
 JOIN hotel_user.vip_level_policy v ON v.vip_level = u.vip_level;
 COMMENT ON TABLE hotel_user.v_user_vip_info IS 'User VIP Member Information View (with level benefits)';
 
--- 1.3 Daily booking statistics view (by hotel and date)
+-- 每日预订统计视图（按酒店和日期）
 CREATE OR REPLACE VIEW hotel_user.v_daily_booking_stats AS
 SELECT
     h.id AS hotel_id,
@@ -1351,30 +1352,30 @@ LEFT JOIN hotel_user.bookings b ON b.hotel_id = h.id
 GROUP BY h.id, h.name, TRUNC(b.start_time);
 COMMENT ON TABLE hotel_user.v_daily_booking_stats IS 'Daily Booking Statistics View';
 
--- 2. Triggers -----------------------------------------------------------------
--- 2.1 Automatically sync room status when booking status changes
+-- 触发器 -----------------------------------------------------------------
+-- 预订状态变更时自动同步房间状态
 CREATE OR REPLACE TRIGGER hotel_user.trg_booking_status_update
 AFTER UPDATE OF status ON hotel_user.bookings
 FOR EACH ROW
 DECLARE
     v_room_status NUMBER(3);
 BEGIN
-    -- When booking status becomes CHECKED_IN, set room status to 3 (occupied)
+    -- 当预订状态变为CHECKED_IN时，设置房间状态为3（已入住）
     IF :NEW.status = 'CHECKED_IN' THEN
         UPDATE hotel_user.room
         SET status = 3,
             updated_time = SYSDATE
         WHERE id = :NEW.room_id;
-    -- When booking status becomes CHECKED_OUT, set room status to 1 (vacant) and record last checkout time
+    -- 当预订状态变为CHECKED_OUT时，设置房间状态为1（空闲）并记录最后退房时间
     ELSIF :NEW.status = 'CHECKED_OUT' THEN
         UPDATE hotel_user.room
         SET status = 1,
             last_checkout_time = SYSDATE,
             updated_time = SYSDATE
         WHERE id = :NEW.room_id;
-    -- When booking is cancelled or refunded, restore room status to 1 (vacant), but ensure no other valid bookings exist
+    -- 当预订被取消或退款时，恢复房间状态为1（空闲），但需确保没有其他有效预订存在
     ELSIF :NEW.status IN ('CANCELLED', 'REFUNDED') THEN
-        -- Check if there are other valid bookings (checked in or future)
+        -- 检查是否存在其他有效预订（已入住或未来）
         DECLARE
             v_other_bookings NUMBER;
         BEGIN
@@ -1395,16 +1396,16 @@ BEGIN
 END;
 /
 
--- 2.2 Automatically reduce room type available count when booking created (prevent overbooking)
+-- 创建预订时自动减少房型可用数量（防止超订）
 CREATE OR REPLACE TRIGGER hotel_user.trg_booking_insert
 AFTER INSERT ON hotel_user.bookings
 FOR EACH ROW
 DECLARE
     v_available_count NUMBER;
 BEGIN
-    -- Only effective for booking statuses that require room occupancy
+    -- 仅对需要占用房间的预订状态生效
     IF :NEW.status IN ('PENDING', 'PENDING_CONFIRMATION', 'PENDING_PAYMENT', 'CONFIRMED', 'CHECKED_IN') THEN
-        -- Lock the room type row to avoid concurrency
+        -- 锁定房型行以避免并发问题
         UPDATE hotel_user.room_type
         SET available_count = available_count - 1,
             updated_time = SYSDATE
@@ -1419,7 +1420,7 @@ BEGIN
 END;
 /
 
--- 2.3 Restore room type available count on cancellation or refund
+-- 取消或退款时恢复房型可用数量
 CREATE OR REPLACE TRIGGER hotel_user.trg_booking_cancel_refund
 AFTER UPDATE OF status ON hotel_user.bookings
 FOR EACH ROW
@@ -1434,14 +1435,14 @@ BEGIN
 END;
 /
 
--- 2.4 Automatically update VIP level when user total consumption changes
+-- 用户总消费额变更时自动更新VIP等级
 CREATE OR REPLACE TRIGGER hotel_user.trg_user_vip_upgrade
 AFTER UPDATE OF total_consumption ON hotel_user.users
 FOR EACH ROW
 DECLARE
     v_new_level NUMBER(3);
 BEGIN
-    -- Determine VIP level based on total consumption (thresholds correspond to vip_level_policy table: level0=0, level1=5000, level2=15000, level3=30000, level4=50000)
+    -- 根据总消费额确定VIP等级（阈值对应vip_level_policy表：level0=0, level1=5000, level2=15000, level3=30000, level4=50000）
     v_new_level := CASE
         WHEN :NEW.total_consumption >= 50000 THEN 4
         WHEN :NEW.total_consumption >= 30000 THEN 3
@@ -1458,8 +1459,8 @@ BEGIN
 END;
 /
 
--- 3. Stored Procedures -----------------------------------------------------------------
--- 3.1 Generate daily room statistics for a given date range (write to vacancy_statistics)
+-- 存储过程 -----------------------------------------------------------------
+-- 生成指定日期范围内的每日房间统计（写入vacancy_statistics表）
 CREATE OR REPLACE PROCEDURE hotel_user.generate_daily_stats(
     p_start_date DATE,
     p_end_date   DATE
@@ -1475,33 +1476,33 @@ CREATE OR REPLACE PROCEDURE hotel_user.generate_daily_stats(
     v_locked_rooms NUMBER;
     v_vacancy_rate NUMBER(5,4);
 BEGIN
-    -- Loop over dates
+    -- 遍历日期
     FOR v_stat_date IN p_start_date .. p_end_date LOOP
-        -- Loop over all hotel-room type combinations
+        -- 遍历所有酒店-房型组合
         FOR rec IN (SELECT h.id AS hotel_id, rt.id AS room_type_id, rt.total_count
                     FROM hotel_user.hotel h
                     JOIN hotel_user.room_type rt ON rt.hotel_id = h.id
                     WHERE rt.is_active = 1) LOOP
-            -- Count room statuses
+            -- 统计房间状态数量
             SELECT COUNT(*),
                    COUNT(CASE WHEN r.status = 1 THEN 1 END),
-                   COUNT(CASE WHEN r.status = 3 THEN 1 END),   -- occupied
-                   COUNT(CASE WHEN r.status = 2 THEN 1 END),   -- booked
-                   COUNT(CASE WHEN r.status = 5 THEN 1 END)    -- maintenance
+                   COUNT(CASE WHEN r.status = 3 THEN 1 END),   -- 已入住
+                   COUNT(CASE WHEN r.status = 2 THEN 1 END),   -- 已预订
+                   COUNT(CASE WHEN r.status = 5 THEN 1 END)    -- 维修中
             INTO v_total_rooms, v_available_rooms, v_occupied_rooms, v_reserved_rooms, v_maintenance_rooms
             FROM hotel_user.room r
             WHERE r.room_type_id = rec.room_type_id;
 
-            v_locked_rooms := 0; -- No locked status currently
+            v_locked_rooms := 0; -- 当前无锁定状态
 
-            -- Calculate vacancy rate (simple available/total)
+            -- 计算空房率（简单可用/总数）
             IF v_total_rooms > 0 THEN
                 v_vacancy_rate := v_available_rooms / v_total_rooms;
             ELSE
                 v_vacancy_rate := 0;
             END IF;
 
-            -- Insert or update statistics
+            -- 插入或更新统计
             MERGE INTO hotel_user.vacancy_statistics vs
             USING (SELECT rec.hotel_id AS hid, rec.room_type_id AS rtid, v_stat_date AS sdate, NULL AS shour FROM DUAL) src
             ON (vs.hotel_id = src.hid AND vs.room_type_id = src.rtid AND vs.stat_date = src.sdate AND vs.stat_hour IS NULL)
@@ -1522,7 +1523,7 @@ BEGIN
                 INSERT (id, hotel_id, room_type_id, stat_date, stat_hour, total_rooms, available_rooms,
                         occupied_rooms, reserved_rooms, maintenance_rooms, locked_rooms,
                         vacancy_count, vacancy_rate, occupancy_rate, booking_rate, created_at, updated_at)
-                VALUES (hotel_user.seq_vacancy_statistics.NEXTVAL, rec.hotel_id, rec.room_type_id, v_stat_date, NULL,
+                VALUES (seq_vacancy_statistics.NEXTVAL, rec.hotel_id, rec.room_type_id, v_stat_date, NULL,
                         v_total_rooms, v_available_rooms, v_occupied_rooms, v_reserved_rooms,
                         v_maintenance_rooms, v_locked_rooms, v_available_rooms, v_vacancy_rate,
                         v_occupied_rooms/NULLIF(v_total_rooms,0), v_reserved_rooms/NULLIF(v_total_rooms,0),
@@ -1534,7 +1535,7 @@ BEGIN
 END generate_daily_stats;
 /
 
--- 3.2 Perform monthly VIP level batch upgrade (based on annual total consumption)
+-- 执行月度VIP等级批量升级（基于年度总消费额）
 CREATE OR REPLACE PROCEDURE hotel_user.monthly_vip_upgrade IS
     CURSOR c_user IS
         SELECT id, total_consumption, vip_level FROM hotel_user.users;
@@ -1563,8 +1564,8 @@ BEGIN
 END monthly_vip_upgrade;
 /
 
--- 4. Functions -----------------------------------------------------------------
--- 4.1 Return applicable VIP discount rate for a user ID
+-- 函数 -----------------------------------------------------------------
+-- 返回指定用户ID适用的VIP折扣率
 CREATE OR REPLACE FUNCTION hotel_user.get_user_discount(p_user_id NUMBER) RETURN NUMBER IS
     v_discount_rate NUMBER(4,3);
 BEGIN
@@ -1580,8 +1581,8 @@ EXCEPTION
 END get_user_discount;
 /
 
--- 4.2 Calculate total booking amount (based on nights, base price, and VIP discount)
--- Simplified: assumes daily price is constant, dynamic pricing not considered
+-- 计算预订总金额（基于晚数、基础价格和VIP折扣）
+-- 简化版：假设每日价格不变，不考虑动态定价
 CREATE OR REPLACE FUNCTION hotel_user.calculate_booking_amount(
     p_room_type_id NUMBER,
     p_start_date DATE,
@@ -1603,7 +1604,7 @@ BEGIN
 END calculate_booking_amount;
 /
 
--- 4.3 Calculate refundable amount for a booking ID (simple full refund if check-in hasn't started)
+-- 计算指定预订ID的可退款金额（若未开始办理入住则全额退款）
 CREATE OR REPLACE FUNCTION hotel_user.calculate_refund_amount(p_booking_id NUMBER) RETURN NUMBER IS
     v_paid_amount NUMBER(10,2);
     v_status VARCHAR2(30);
@@ -1611,7 +1612,7 @@ CREATE OR REPLACE FUNCTION hotel_user.calculate_refund_amount(p_booking_id NUMBE
 BEGIN
     SELECT paid_amount, status, start_time INTO v_paid_amount, v_status, v_start_date
     FROM hotel_user.bookings WHERE id = p_booking_id;
-    -- If paid, not already refunded/cancelled/checked out, and check-in hasn't started, full refund is possible
+    -- 如果已付款、未退款/取消/退房、且尚未开始办理入住，则可全额退款
     IF v_paid_amount > 0 AND v_status NOT IN ('REFUNDED','CANCELLED','CHECKED_OUT') AND v_start_date > SYSDATE THEN
         RETURN v_paid_amount;
     ELSE
@@ -1620,17 +1621,6 @@ BEGIN
 END calculate_refund_amount;
 /
 
--- Create sequence for vacancy_statistics if it does not exist
-DECLARE
-    v_cnt NUMBER;
-BEGIN
-    SELECT COUNT(*) INTO v_cnt FROM all_sequences WHERE sequence_owner = 'HOTEL_USER' AND sequence_name = 'SEQ_VACANCY_STATISTICS';
-    IF v_cnt = 0 THEN
-        EXECUTE IMMEDIATE 'CREATE SEQUENCE hotel_user.seq_vacancy_statistics START WITH 1 INCREMENT BY 1';
-    END IF;
-END;
-/
-
--- Output completion message
+-- 输出完成信息
 SELECT 'Advanced features (views, triggers, procedures, functions) added successfully.' AS status FROM DUAL;
 COMMIT;
