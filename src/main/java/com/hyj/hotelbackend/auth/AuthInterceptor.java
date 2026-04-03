@@ -24,7 +24,7 @@ public class AuthInterceptor implements HandlerInterceptor {
                              @NonNull Object handler) {
         String path = request.getRequestURI();
         // Public endpoints
-        if (path.startsWith("/api/auth/login") || path.startsWith("/api/auth/register") || path.startsWith("/api/health")) {
+        if (path.startsWith("/api/auth/login") || path.startsWith("/api/auth/register") || path.startsWith("/api/health") || path.startsWith("/api/chat")) {
             return true;
         }
         // Allow public browsing endpoints, attach user context if token exists
