@@ -1,13 +1,13 @@
-package com.group.hotelbackend.service.impl;
+package com.hyj.hotelbackend.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.group.hotelbackend.entity.Room;
-import com.group.hotelbackend.entity.RoomPriceStrategy;
-import com.group.hotelbackend.entity.VipLevelPolicy;
-import com.group.hotelbackend.mapper.RoomPriceStrategyMapper;
-import com.group.hotelbackend.mapper.VipLevelPolicyMapper;
-import com.group.hotelbackend.service.RoomService;
-import com.group.hotelbackend.service.VipPricingService;
+import com.hyj.hotelbackend.entity.Room;
+import com.hyj.hotelbackend.entity.RoomPriceStrategy;
+import com.hyj.hotelbackend.entity.VipLevelPolicy;
+import com.hyj.hotelbackend.mapper.RoomPriceStrategyMapper;
+import com.hyj.hotelbackend.mapper.VipLevelPolicyMapper;
+import com.hyj.hotelbackend.service.RoomService;
+import com.hyj.hotelbackend.service.VipPricingService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
 import org.springframework.stereotype.Service;

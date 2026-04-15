@@ -82,6 +82,31 @@ public class RoomController {
         return rooms;
     }
 
+    @PostMapping("/import")
+    @Transactional
+    public Map<String, Object> importRooms(@RequestBody List<Room> rooms) {
+        AuthUser me = CurrentUserHolder.get();
+        if (me == null || me.getRole() == null || !"ADMIN".equals(me.getRole())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可导入房型");
+        }
+        if (rooms == null || rooms.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "导入数据不能为空");
+        }
+        int count = 0;
+        for (Room room : rooms) {
+            if (room.getId() != null && roomService.getById(room.getId()) != null) {
+                roomService.updateById(room);
+            } else {
+                roomService.save(room);
+            }
+            count++;
+        }
+        Map<String, Object> res = new HashMap<>();
+        res.put("success", true);
+        res.put("message", "成功导入 " + count + " 条房型数据");
+        return res;
+    }
+
     @GetMapping("/{id}")
     public Room get(@PathVariable Long id) {
         Room r = roomService.getById(id);
@@ -158,9 +183,9 @@ public class RoomController {
 
     @GetMapping("/occupancy-overview")
     public RoomOccupancyOverviewResponse occupancyOverview(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime start,
-                                                            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end,
-                                                            @RequestParam(required = false) Long hotelId,
-                                                            @RequestParam(required = false) Long roomTypeId) {
+                                                           @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end,
+                                                           @RequestParam(required = false) Long hotelId,
+                                                           @RequestParam(required = false) Long roomTypeId) {
         AuthUser me = CurrentUserHolder.get();
         if (me == null || me.getRole() == null || !"ADMIN".equals(me.getRole())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可查看入住规划");
@@ -181,12 +206,12 @@ public class RoomController {
         if (roomTypeId != null) {
             bookingQuery.eq(Booking::getRoomTypeId, roomTypeId);
         }
-    bookingQuery.lt(Booking::getStartTime, windowEnd).gt(Booking::getEndTime, windowStart);
-    bookingQuery
-        .orderByAsc(Booking::getRoomTypeId)
-        .orderByAsc(Booking::getRoomId)
-        .orderByAsc(Booking::getStartTime)
-        .orderByAsc(Booking::getId);
+        bookingQuery.lt(Booking::getStartTime, windowEnd).gt(Booking::getEndTime, windowStart);
+        bookingQuery
+                .orderByAsc(Booking::getRoomTypeId)
+                .orderByAsc(Booking::getRoomId)
+                .orderByAsc(Booking::getStartTime)
+                .orderByAsc(Booking::getId);
         List<Booking> bookings = bookingService.list(bookingQuery);
 
         LambdaQueryWrapper<RoomInstance> roomQuery = new LambdaQueryWrapper<>();
@@ -237,7 +262,7 @@ public class RoomController {
         if (!windowStart.isBefore(windowEnd)) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "时间范围无效");
         }
-    int safeSize = size == null ? 7 : Math.min(Math.max(size, 1), 7);
+        int safeSize = size == null ? 7 : Math.min(Math.max(size, 1), 7);
         int requestedPage = page == null ? 1 : Math.max(page, 1);
 
         LambdaQueryWrapper<RoomInstance> roomQuery = new LambdaQueryWrapper<>();
@@ -341,14 +366,14 @@ public class RoomController {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可调整库存");
         }
         if (totalCount < 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "totalCount 不能为负数");
-    Room r = roomService.getById(id);
+        Room r = roomService.getById(id);
         if (r == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在");
         r.setTotalCount(totalCount);
-    long actualAvailable = roomInstanceService.count(new LambdaQueryWrapper<RoomInstance>()
-        .eq(RoomInstance::getRoomTypeId, id)
-        .eq(RoomInstance::getStatus, 1));
-    int available = (int) Math.min((long) totalCount, actualAvailable);
-    r.setAvailableCount(available);
+        long actualAvailable = roomInstanceService.count(new LambdaQueryWrapper<RoomInstance>()
+                .eq(RoomInstance::getRoomTypeId, id)
+                .eq(RoomInstance::getStatus, 1));
+        int available = (int) Math.min((long) totalCount, actualAvailable);
+        r.setAvailableCount(available);
         roomService.updateById(r);
         return r;
     }
@@ -375,7 +400,7 @@ public class RoomController {
         if (me == null || me.getRole() == null || !"ADMIN".equals(me.getRole())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
         }
-        
+
         // 验证房型是否存在
         Room roomType = roomService.getById(roomTypeId);
         if (roomType == null) {
@@ -404,12 +429,12 @@ public class RoomController {
         room.setStatus(status);
         room.setCreatedTime(LocalDateTime.now());
         room.setUpdatedTime(LocalDateTime.now());
-        
+
         roomInstanceService.save(room);
-        
+
         // 更新房型的总数和可用数
         updateRoomTypeCounts(roomTypeId);
-        
+
         return room;
     }
 
@@ -421,7 +446,7 @@ public class RoomController {
         if (me == null || me.getRole() == null || !"ADMIN".equals(me.getRole())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
         }
-        
+
         RoomInstance room = roomInstanceService.getById(roomId);
         if (room == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房间不存在");
@@ -450,12 +475,12 @@ public class RoomController {
             room.setStatus(request.status);
         }
         room.setUpdatedTime(LocalDateTime.now());
-        
+
         roomInstanceService.updateById(room);
-        
+
         // 更新房型的可用数
         updateRoomTypeCounts(room.getRoomTypeId());
-        
+
         return room;
     }
 
@@ -467,7 +492,7 @@ public class RoomController {
         if (me == null || me.getRole() == null || !"ADMIN".equals(me.getRole())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可操作");
         }
-        
+
         RoomInstance room = roomInstanceService.getById(roomId);
         if (room == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房间不存在");
@@ -480,17 +505,17 @@ public class RoomController {
         long activeBookingCount = bookingService.count(new LambdaQueryWrapper<Booking>()
                 .eq(Booking::getRoomId, roomId)
                 .in(Booking::getStatus, activeStatuses));
-        
+
         if (activeBookingCount > 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "该房间有活跃订单，无法删除");
         }
 
         Long roomTypeId = room.getRoomTypeId();
         roomInstanceService.removeById(roomId);
-        
+
         // 更新房型的总数和可用数
         updateRoomTypeCounts(roomTypeId);
-        
+
         Map<String, Object> result = new HashMap<>();
         result.put("success", true);
         result.put("message", "删除成功");
@@ -504,7 +529,7 @@ public class RoomController {
 
         long totalCount = roomInstanceService.count(new LambdaQueryWrapper<RoomInstance>()
                 .eq(RoomInstance::getRoomTypeId, roomTypeId));
-        
+
         long availableCount = roomInstanceService.count(new LambdaQueryWrapper<RoomInstance>()
                 .eq(RoomInstance::getRoomTypeId, roomTypeId)
                 .eq(RoomInstance::getStatus, 1));
@@ -568,7 +593,7 @@ public class RoomController {
         if (overlapping >= r.getTotalCount()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该时间段内所有房间已满，请选择其他时间");
         }
-        
+
         // 智能房间分配：查找在指定时间段内没有冲突的房间
         // 1. 获取该房型在该酒店的所有可用房间实例
         List<RoomInstance> availableRooms = roomInstanceService.lambdaQuery()
@@ -577,16 +602,16 @@ public class RoomController {
                 .in(RoomInstance::getStatus, Arrays.asList(1, 2)) // 1=空房，2=已预订
                 .orderByAsc(RoomInstance::getRoomNumber)
                 .list();
-        
+
         if (availableRooms == null || availableRooms.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "暂无可用房间，请稍后再试");
         }
-        
+
         // 2. 获取所有房间在该时间段内的预订记录
         List<Long> roomInstanceIds = availableRooms.stream()
                 .map(RoomInstance::getId)
                 .collect(Collectors.toList());
-        
+
         List<Booking> conflictingBookings = bookingService.list(new LambdaQueryWrapper<Booking>()
                 .in(Booking::getRoomId, roomInstanceIds)
                 .ne(Booking::getStatus, "CHECKED_OUT")
@@ -594,12 +619,12 @@ public class RoomController {
                 .lt(Booking::getStartTime, end)
                 .gt(Booking::getEndTime, start)
         );
-        
+
         // 3. 构建已占用房间的集合
         Set<Long> occupiedRoomIds = conflictingBookings.stream()
                 .map(Booking::getRoomId)
                 .collect(Collectors.toSet());
-        
+
         // 4. 找到第一个没有时间冲突的房间
         RoomInstance allocated = null;
         for (RoomInstance room : availableRooms) {
@@ -608,31 +633,31 @@ public class RoomController {
                 break;
             }
         }
-        
+
         // 5. 如果所有房间都有冲突，返回错误
         if (allocated == null) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, 
-                String.format("该时间段内所有%s房间已满，共有%d间房，已被预订%d间。请选择其他时间或房型。", 
-                    r.getName(), availableRooms.size(), occupiedRoomIds.size()));
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    String.format("该时间段内所有%s房间已满，共有%d间房，已被预订%d间。请选择其他时间或房型。",
+                            r.getName(), availableRooms.size(), occupiedRoomIds.size()));
         }
         User chargeUser = userMapper.selectById(actualUserId);
         if (chargeUser == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "用户不存在");
         }
-    Booking b = new Booking();
+        Booking b = new Booking();
         b.setHotelId(resolvedHotelId);
         b.setRoomTypeId(r.getId());
         b.setRoomId(allocated.getId());
         b.setUserId(actualUserId);
-    b.setStartTime(start);
-    b.setEndTime(end);
+        b.setStartTime(start);
+        b.setEndTime(end);
         int guestCount = request.guests != null && request.guests > 0 ? request.guests : 1;
         b.setGuests(guestCount);
         int checkoutHour = vipPricingService.getCheckoutBoundaryHour(chargeUser.getVipLevel());
         long days = computeChargeableDays(start, end, checkoutHour);
         BigDecimal basePrice = r.getPricePerNight() == null ? BigDecimal.ZERO : r.getPricePerNight();
         BigDecimal originalAmount = basePrice.multiply(BigDecimal.valueOf(days));
-    BigDecimal discountRate = vipPricingService.getDiscountRateForRoom(r.getId(), chargeUser.getVipLevel());
+        BigDecimal discountRate = vipPricingService.getDiscountRateForRoom(r.getId(), chargeUser.getVipLevel());
         BigDecimal payableAmount = originalAmount.multiply(discountRate).setScale(2, RoundingMode.HALF_UP);
         if (payableAmount.compareTo(BigDecimal.ZERO) <= 0) {
             payableAmount = originalAmount.setScale(2, RoundingMode.HALF_UP);
@@ -643,19 +668,19 @@ public class RoomController {
         b.setPayableAmount(payableAmount);
         b.setAmount(payableAmount);
         b.setPaidAmount(BigDecimal.ZERO);
-    b.setDiscountRate(discountRate);
-    String normalizedMethod = normalizePaymentMethod(request.paymentMethod);
-    if ("ADMIN".equals(normalizedMethod) && !isAdmin) {
-        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可创建免支付预订");
-    }
-    boolean adminDirect = isAdmin && "ADMIN".equals(normalizedMethod);
-    String paymentMethod = adminDirect ? "ADMIN" : normalizedMethod;
-    String paymentChannel = adminDirect ? "ADMIN" : resolvePaymentChannel(paymentMethod, request.paymentChannel);
-    boolean payNow = adminDirect ? false : shouldPayImmediately(paymentMethod, request.payNow);
-    b.setPaymentMethod(paymentMethod);
-    b.setPaymentChannel(paymentChannel);
-    b.setStatus(resolveInitialStatus(paymentMethod));
-    b.setPaymentStatus(adminDirect ? "WAIVED" : "UNPAID");
+        b.setDiscountRate(discountRate);
+        String normalizedMethod = normalizePaymentMethod(request.paymentMethod);
+        if ("ADMIN".equals(normalizedMethod) && !isAdmin) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可创建免支付预订");
+        }
+        boolean adminDirect = isAdmin && "ADMIN".equals(normalizedMethod);
+        String paymentMethod = adminDirect ? "ADMIN" : normalizedMethod;
+        String paymentChannel = adminDirect ? "ADMIN" : resolvePaymentChannel(paymentMethod, request.paymentChannel);
+        boolean payNow = adminDirect ? false : shouldPayImmediately(paymentMethod, request.payNow);
+        b.setPaymentMethod(paymentMethod);
+        b.setPaymentChannel(paymentChannel);
+        b.setStatus(resolveInitialStatus(paymentMethod));
+        b.setPaymentStatus(adminDirect ? "WAIVED" : "UNPAID");
         b.setCurrency("CNY");
         if (request.contactName != null && !request.contactName.trim().isEmpty()) {
             b.setContactName(request.contactName.trim());
@@ -669,10 +694,10 @@ public class RoomController {
         if (request.remark != null) {
             b.setRemark(request.remark.trim());
         }
-    bookingService.save(b);
-    allocated.setStatus(2);
-    allocated.setUpdatedTime(LocalDateTime.now());
-    roomInstanceService.updateById(allocated);
+        bookingService.save(b);
+        allocated.setStatus(2);
+        allocated.setUpdatedTime(LocalDateTime.now());
+        roomInstanceService.updateById(allocated);
         // payment handling
         if (payNow) {
             if ("WALLET".equals(paymentMethod)) {
@@ -771,13 +796,13 @@ public class RoomController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "管理员代客预约需提供客户联系电话");
         }
         String phone = contactPhone.trim();
-        
+
         // 首先通过电话号码查找用户
         User existing = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getPhone, phone));
         if (existing != null) {
             return existing.getId();
         }
-        
+
         // 如果不存在，则创建新用户
         // 用户名和密码都默认为电话号码
         User u = new User();
@@ -787,7 +812,7 @@ public class RoomController {
         u.setVipLevel(0);
         u.setPhone(phone);
         u.setStatus("ACTIVE");
-        
+
         try {
             userMapper.insert(u);
         } catch (Exception e) {
@@ -796,7 +821,7 @@ public class RoomController {
             u.setUsername(alternativeUsername);
             userMapper.insert(u);
         }
-        
+
         if (u.getId() == null) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "创建用户失败");
         }
