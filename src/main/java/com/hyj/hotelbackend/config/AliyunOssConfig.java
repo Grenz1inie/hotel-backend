@@ -1,4 +1,4 @@
-package com.group.hotelbackend.config;
+package com.hyj.hotelbackend.config;
 
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
