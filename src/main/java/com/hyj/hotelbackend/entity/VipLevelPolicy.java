@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 @TableName("vip_level_policy")
 public class VipLevelPolicy {
     @TableId
-    private Integer level;
+    private Integer vip_level;
     private String name;
     private BigDecimal discountRate;
     private Integer checkoutHour;
