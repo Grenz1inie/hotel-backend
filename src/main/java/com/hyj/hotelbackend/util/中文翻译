@@ -1,6 +1,6 @@
-package com.hyj.hotelbackend.util;
+package com.group.hotelbackend.util;
 
-import com.hyj.hotelbackend.config.AliyunOssConfig;
+import com.group.hotelbackend.config.AliyunOssConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -142,53 +142,58 @@ public class ImageUrlUpdater implements CommandLineRunner {
         String gallery1 = replaceWithOssUrl("/images/hotels/xinghe-gallery0.jpg") + "," +
                 replaceWithOssUrl("/images/hotels/xinghe-gallery1.jpg");
 
-        // 星河国际酒店 (id=1)
+        // 星河国际大酒店 (id=1)
         jdbcTemplate.update("UPDATE hotel SET hero_image_url = ?, gallery_images = ? WHERE id = ?",
                 hero1, gallery1, 1);
-        System.out.println("✓ 已更新星河国际酒店图片 URL");
+        System.out.println("✓ 已更新星河国际大酒店图片 URL");
 
-        // 海天假日酒店 (id=2)
+        // 海滩假日酒店 (id=2)
         jdbcTemplate.update("UPDATE hotel SET hero_image_url = ?, gallery_images = ? WHERE id = ?",
                 hero1, gallery1, 2);
-        System.out.println("✓ 已更新海天假日酒店图片 URL");
+        System.out.println("✓ 已更新海滩假日酒店图片 URL");
 
-        // 云栖温泉度假村 (id=3)
+        // 云栖温泉度假酒店 (id=3)
         jdbcTemplate.update("UPDATE hotel SET hero_image_url = ?, gallery_images = ? WHERE id = ?",
                 hero1, gallery1, 3);
-        System.out.println("✓ 已更新云栖温泉度假村图片 URL");
+        System.out.println("✓ 已更新云栖温泉度假酒店图片 URL");
     }
 
     /**
      * 更新房型图片数据：删除旧数据，插入新的（使用 OSS URL）
-     * 注意：此处的 SQL 采用 Oracle 语法（使用 dual 和 listagg），若为 MySQL 需改为对应的 VALUES 语法。
+     * 房型名称采用 SQL 文件中的中文名称
      */
     private void updateRoomImages() {
         // 先删除旧数据
         jdbcTemplate.update("DELETE FROM room_images");
         System.out.println("✓ 已清除旧的房型图片数据");
 
-        // 房型名称与图片的对应关系（保持和原逻辑一致）
+        // 房型中文名称与图片的对应关系（保持和原逻辑一致）
         Object[][] roomImageData = {
-                {"Xinghe Executive King Room", "/images/rooms/xinghe-exec-1.jpg", 1, 1},
-                {"Xinghe Executive King Room", "/images/rooms/xinghe-exec-2.jpg", 0, 2},
-                {"Xinghe Executive King Room", "/images/rooms/xinghe-exec-3.jpg", 0, 3},
-                {"Xinghe Family Suite", "/images/rooms/xinghe-family-1.jpg", 1, 1},
-                {"Xinghe Family Suite", "/images/rooms/xinghe-family-2.jpg", 0, 2},
-                {"Xinghe Family Suite", "/images/rooms/xinghe-family-3.jpg", 0, 3},
-                {"Xinghe City View Room", "/images/rooms/xinghe-city-1.jpg", 1, 1},
-                {"Xinghe City View Room", "/images/rooms/xinghe-city-2.jpg", 0, 2},
-                {"Haitian Infinity Sea View Room", "/images/rooms/xinghe-exec-1.jpg", 1, 1},
-                {"Haitian Infinity Sea View Room", "/images/rooms/xinghe-exec-2.jpg", 0, 2},
-                {"Haitian Family Fun Room", "/images/rooms/xinghe-family-1.jpg", 1, 1},
-                {"Haitian Family Fun Room", "/images/rooms/xinghe-family-2.jpg", 0, 2},
-                {"Haitian Deluxe Suite", "/images/rooms/xinghe-city-1.jpg", 1, 1},
-                {"Haitian Deluxe Suite", "/images/rooms/xinghe-city-2.jpg", 0, 2},
-                {"Yunqi Hot Spring King Room", "/images/rooms/xinghe-exec-1.jpg", 1, 1},
-                {"Yunqi Hot Spring King Room", "/images/rooms/xinghe-exec-2.jpg", 0, 2},
-                {"Yunqi Forest Cabin", "/images/rooms/xinghe-family-1.jpg", 1, 1},
-                {"Yunqi Forest Cabin", "/images/rooms/xinghe-family-2.jpg", 0, 2},
-                {"Yunqi Zen Suite", "/images/rooms/xinghe-city-1.jpg", 1, 1},
-                {"Yunqi Zen Suite", "/images/rooms/xinghe-city-2.jpg", 0, 2}
+                // 星河国际大酒店房型
+                {"星河行政大床房", "/images/rooms/xinghe-exec-1.jpg", 1, 1},
+                {"星河行政大床房", "/images/rooms/xinghe-exec-2.jpg", 0, 2},
+                {"星河行政大床房", "/images/rooms/xinghe-exec-3.jpg", 0, 3},
+                {"星河家庭套房", "/images/rooms/xinghe-family-1.jpg", 1, 1},
+                {"星河家庭套房", "/images/rooms/xinghe-family-2.jpg", 0, 2},
+                {"星河家庭套房", "/images/rooms/xinghe-family-3.jpg", 0, 3},
+                {"星河城市景观房", "/images/rooms/xinghe-city-1.jpg", 1, 1},
+                {"星河城市景观房", "/images/rooms/xinghe-city-2.jpg", 0, 2},
+
+                // 海滩假日酒店房型
+                {"海景观景房", "/images/rooms/xinghe-exec-1.jpg", 1, 1},
+                {"海景观景房", "/images/rooms/xinghe-exec-2.jpg", 0, 2},
+                {"海豚家庭主题房", "/images/rooms/xinghe-family-1.jpg", 1, 1},
+                {"海豚家庭主题房", "/images/rooms/xinghe-family-2.jpg", 0, 2},
+                {"海天云顶套房", "/images/rooms/xinghe-city-1.jpg", 1, 1},
+                {"海天云顶套房", "/images/rooms/xinghe-city-2.jpg", 0, 2},
+
+                // 云栖温泉度假酒店房型
+                {"云栖私汤大床房", "/images/rooms/xinghe-exec-1.jpg", 1, 1},
+                {"云栖私汤大床房", "/images/rooms/xinghe-exec-2.jpg", 0, 2},
+                {"云栖森林木屋", "/images/rooms/xinghe-family-1.jpg", 1, 1},
+                {"云栖森林木屋", "/images/rooms/xinghe-family-2.jpg", 0, 2},
+                {"云栖禅意套房", "/images/rooms/xinghe-city-1.jpg", 1, 1},
+                {"云栖禅意套房", "/images/rooms/xinghe-city-2.jpg", 0, 2}
         };
 
         String insertSql = "INSERT INTO room_images (room_type_id, url, is_primary, sort_order) " +
