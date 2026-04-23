@@ -2,6 +2,9 @@ server:
   port: 8080
 
 spring:
+  application:
+    name: hotel-backend
+
   config:
     import: optional:nacos:application.yml
 
@@ -28,7 +31,6 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
-minio:
 aliyun:
   oss:
     endpoint: oss-cn-beijing.aliyuncs.com
@@ -46,3 +48,9 @@ mybatis-plus:
 jwt:
   secret: "change-this-secret-to-a-very-long-random-string"
   expires-hours: 12
+
+deepseek:
+  api:
+    url: https://api.deepseek.com/v1/chat/completions
+    key: sk-xxxxxx
+  model: deepseek-chat
