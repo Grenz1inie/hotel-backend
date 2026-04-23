@@ -46,18 +46,18 @@ public class VipPricingServiceImpl implements VipPricingService {
 
     private static final Map<Integer, String> LEVEL_DESCRIPTIONS = Map.of(
             0, "注册即可成为普通会员，享受基础服务",
-        1, "年消费满 5000 元晋升白银会员，享受 95 折",
-        2, "年消费满 15000 元晋升黄金会员，享受 9 折",
-        3, "年消费满 30000 元晋升铂金会员，享受 88 折",
-        4, "受邀成为钻石会员，建议年消费 50000 元以上，享受 85 折并附赠贵宾礼遇"
+            1, "年消费满 5000 元晋升白银会员，享受 95 折",
+            2, "年消费满 15000 元晋升黄金会员，享受 9 折",
+            3, "年消费满 30000 元晋升铂金会员，享受 88 折",
+            4, "受邀成为钻石会员，建议年消费 50000 元以上，享受 85 折并附赠贵宾礼遇"
     );
 
     private static final Map<Integer, Integer> DEFAULT_CHECKOUT_HOURS = Map.of(
-        0, 12,
-        1, 13,
-        2, 14,
-        3, 15,
-        4, 16
+            0, 12,
+            1, 13,
+            2, 14,
+            3, 15,
+            4, 16
     );
 
     @Autowired
@@ -144,16 +144,16 @@ public class VipPricingServiceImpl implements VipPricingService {
 
     @Override
     public List<VipLevelDescriptor> getVipLevelDescriptors() {
-    Map<Integer, VipLevelPolicy> policies = loadPolicyMap();
-    return policies.values().stream()
-        .sorted(Comparator.comparingInt(VipLevelPolicy::getLevel))
-        .map(policy -> new VipLevelDescriptor(
-            policy.getLevel(),
-            policy.getName(),
-            scaleRate(policy.getDiscountRate()),
-            policy.getCheckoutHour(),
-            policy.getDescription()
-        ))
+        Map<Integer, VipLevelPolicy> policies = loadPolicyMap();
+        return policies.values().stream()
+                .sorted(Comparator.comparingInt(VipLevelPolicy::getVip_level))
+                .map(policy -> new VipLevelDescriptor(
+                        policy.getVip_level(),
+                        policy.getName(),
+                        scaleRate(policy.getDiscountRate()),
+                        policy.getCheckoutHour(),
+                        policy.getDescription()
+                ))
                 .collect(Collectors.toList());
     }
 
@@ -180,15 +180,15 @@ public class VipPricingServiceImpl implements VipPricingService {
 
     private Map<Integer, VipLevelPolicy> loadPolicyMap() {
         List<VipLevelPolicy> policies = vipLevelPolicyMapper.selectList(new LambdaQueryWrapper<VipLevelPolicy>()
-                .orderByAsc(VipLevelPolicy::getLevel));
+                .orderByAsc(VipLevelPolicy::getVip_level));
         Map<Integer, VipLevelPolicy> map = new LinkedHashMap<>();
         if (policies != null) {
             for (VipLevelPolicy policy : policies) {
-                if (policy == null || policy.getLevel() == null) {
+                if (policy == null || policy.getVip_level() == null) {
                     continue;
                 }
                 ensurePolicyDefaults(policy);
-                map.put(policy.getLevel(), policy);
+                map.put(policy.getVip_level(), policy);
             }
         }
         DEFAULT_CHECKOUT_HOURS.keySet().stream()
@@ -198,8 +198,8 @@ public class VipPricingServiceImpl implements VipPricingService {
     }
 
     private void ensurePolicyDefaults(VipLevelPolicy policy) {
-        int level = safeVipLevel(policy.getLevel());
-        policy.setLevel(level);
+        int level = safeVipLevel(policy.getVip_level());
+        policy.setVip_level(level);
         if (!StringUtils.hasText(policy.getName())) {
             policy.setName(LEVEL_NAMES.getOrDefault(level, "VIP " + level));
         }
@@ -218,7 +218,7 @@ public class VipPricingServiceImpl implements VipPricingService {
     private VipLevelPolicy createDefaultPolicy(Integer level) {
         VipLevelPolicy policy = new VipLevelPolicy();
         int safeLevel = safeVipLevel(level);
-        policy.setLevel(safeLevel);
+        policy.setVip_level(safeLevel);
         policy.setName(LEVEL_NAMES.getOrDefault(safeLevel, "VIP " + safeLevel));
         policy.setDiscountRate(scaleRate(BASE_RATES.getOrDefault(safeLevel, BigDecimal.ONE)));
         policy.setCheckoutHour(DEFAULT_CHECKOUT_HOURS.getOrDefault(safeLevel, 12));
