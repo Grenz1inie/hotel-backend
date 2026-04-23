@@ -1,6 +1,6 @@
-package com.group.hotelbackend.util;
+package com.hyj.hotelbackend.util;
 
-import com.group.hotelbackend.config.AliyunOssConfig;
+import com.hyj.hotelbackend.config.AliyunOssConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
