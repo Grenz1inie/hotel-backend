@@ -2,6 +2,8 @@ server:
   port: 8080
 
 spring:
+  profiles:
+    active: dev
   application:
     name: hotel-backend
   config:
@@ -16,7 +18,7 @@ spring:
 
   datasource:
     driver-class-name: oracle.jdbc.OracleDriver
-    url: jdbc:oracle:thin:@hotel-oracle:1521/FREEPDB1
+    # 现在具体配置已移至 application-dev.yml 和 application-prod.yml
     username: hotel_user
     password: 123456
 
