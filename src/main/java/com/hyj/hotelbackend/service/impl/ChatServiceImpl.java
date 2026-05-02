@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyj.hotelbackend.service.ChatService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -31,7 +30,6 @@ public class ChatServiceImpl implements ChatService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
 
-    @Autowired
     public ChatServiceImpl(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
 

@@ -12,6 +12,8 @@ import com.hyj.hotelbackend.service.RoomInstanceService;
 import com.hyj.hotelbackend.service.RoomService;
 import com.hyj.hotelbackend.service.VacancyStatisticsService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
@@ -40,6 +42,9 @@ public class AnalyticsServiceImpl implements AnalyticsService {
     private final RoomService roomService;
     private final RoomInstanceService roomInstanceService;
     private final VacancyStatisticsService vacancyStatisticsService;
+    private final RedisTemplate<String, Object> redisTemplate;
+
+    private static final String DASHBOARD_CACHE_KEY = "analytics:dashboard:vacancy";
 
     private enum Granularity {
         HOUR, DAY;
@@ -56,7 +61,7 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         }
 
         public long stepAmount() {
-            return this == HOUR ? 1 : 1;
+            return 1;
         }
 
         public ChronoUnit unit() {
@@ -74,8 +79,44 @@ public class AnalyticsServiceImpl implements AnalyticsService {
         }
     }
 
+    @Scheduled(fixedRate = 300000)
+    public void warmupDashboardAnalytics() {
+        try {
+            // 参数全部传 null，代表生成全量默认的看板视图
+            VacancyAnalyticsResponse response = calculateVacancyAnalytics(null, null, null, null, null, null, null);
+            redisTemplate.opsForValue().set(DASHBOARD_CACHE_KEY, response);
+            System.out.println("成功预热统计看板数据到 Redis");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
     @Override
     public VacancyAnalyticsResponse getVacancyAnalytics(List<Long> roomTypeIds,
+                                                        LocalDateTime rawStart,
+                                                        LocalDateTime rawEnd,
+                                                        String granularity,
+                                                        Double thresholdHigh,
+                                                        Double thresholdLow,
+                                                        Integer forecastDays) {
+        // 如果是前端默认看板请求（全 null 参数）
+        if (CollectionUtils.isEmpty(roomTypeIds) && rawStart == null && rawEnd == null && granularity == null 
+               && thresholdHigh == null && thresholdLow == null && forecastDays == null) {
+            Object cached = redisTemplate.opsForValue().get(DASHBOARD_CACHE_KEY);
+            if (cached instanceof VacancyAnalyticsResponse) {
+                return (VacancyAnalyticsResponse) cached;
+            }
+            // 优雅降级：如果不存在则当即计算并写回 Redis
+            VacancyAnalyticsResponse response = calculateVacancyAnalytics(null, null, null, null, null, null, null);
+            redisTemplate.opsForValue().set(DASHBOARD_CACHE_KEY, response);
+            return response;
+        }
+
+        // 自定义条件的查询，不走总体缓存，依然查库
+        return calculateVacancyAnalytics(roomTypeIds, rawStart, rawEnd, granularity, thresholdHigh, thresholdLow, forecastDays);
+    }
+
+    private VacancyAnalyticsResponse calculateVacancyAnalytics(List<Long> roomTypeIds,
                                                         LocalDateTime rawStart,
                                                         LocalDateTime rawEnd,
                                                         String granularity,
