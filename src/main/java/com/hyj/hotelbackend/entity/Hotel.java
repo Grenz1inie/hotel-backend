@@ -32,9 +32,6 @@ public class Hotel {
     @TableField("hero_image_url")
     private String heroImageUrl;
 
-    @TableField("gallery_images")
-    private String galleryImages;
-
     @TableField("created_time")
     private LocalDateTime createdTime;
 
