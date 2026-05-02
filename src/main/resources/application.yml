@@ -1,5 +1,13 @@
 server:
   port: 8080
+  tomcat:
+    threads:
+      max: 2000        # 再拉高一点
+      min-spare: 200   # 保持更多核心线程不回收
+    max-connections: 12000
+    accept-count: 1000
+    connection-timeout: 3000
+    keep-alive-timeout: 60
 
 spring:
   profiles:
@@ -24,9 +32,13 @@ spring:
 
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms   # 避免长时间卡死
+      lettuce:
+        pool:
+          max-active: 800      # 👈 提高
+          max-idle: 300
+          min-idle: 100
+          max-wait: 1000ms     # 👈 降低等待时间
 
   Jackson:
     serialization:
