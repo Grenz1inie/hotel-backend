@@ -54,5 +54,5 @@ jwt:
 deepseek:
   api:
     url: https://api.deepseek.com/v1/chat/completions
-    key: sk-xxxxxx
+    key: ${DEEPSEEK_API_KEY}
   model: deepseek-chat
