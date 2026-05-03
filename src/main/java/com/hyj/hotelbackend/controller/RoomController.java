@@ -401,10 +401,11 @@ public class RoomController {
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
 
-        // 只统计已确认或已入住的预订，PENDING/CANCELLED 等不计入占用
+        // 为了防止数据不一致，将除了“已取消”、“已退款”之外的所有有效预订状态都计入占用
+        // PENDING/PENDING_CONFIRMATION 等虽然未支付，但在流程中应锁定时间片
         List<Booking> bookings = bookingService.getBookingPeriodsByRooms(
                 roomInstanceIds, windowStart, windowEnd,
-                Arrays.asList("CONFIRMED", "CHECKED_IN"));
+                Arrays.asList("PENDING", "PENDING_CONFIRMATION", "PENDING_PAYMENT", "CONFIRMED", "CHECKED_IN", "REFUND_REQUESTED"));
 
         RoomDayAvailabilityResponse response = new RoomDayAvailabilityResponse();
         response.setRoomTypeId(roomTypeId);

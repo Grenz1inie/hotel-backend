@@ -41,11 +41,13 @@ spring:
           min-idle: 100
           max-wait: 1000ms     # 👈 降低等待时间
 
-  Jackson:
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
     serialization:
       write-dates-as-timestamps: false
 
-minio:
+# minio:
 aliyun:
   oss:
     endpoint: oss-cn-beijing.aliyuncs.com
