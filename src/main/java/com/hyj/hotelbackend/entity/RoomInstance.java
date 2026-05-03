@@ -1,5 +1,6 @@
 package com.hyj.hotelbackend.entity;
 
+import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
@@ -10,7 +11,7 @@ import java.time.LocalDateTime;
 @Data
 @TableName("room")
 public class RoomInstance {
-    @TableId
+    @TableId(type = IdType.AUTO)
     private Long id;
 
     @TableField("hotel_id")
