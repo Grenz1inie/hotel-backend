@@ -11,6 +11,7 @@ import com.hyj.hotelbackend.entity.User;
 import com.hyj.hotelbackend.entity.RoomInstance;
 import com.hyj.hotelbackend.entity.WalletTransaction;
 import com.hyj.hotelbackend.entity.PaymentRecord;
+import com.hyj.hotelbackend.dto.RoomDayAvailabilityResponse;
 import com.hyj.hotelbackend.dto.RoomTimelineResponse;
 import com.hyj.hotelbackend.dto.RoomTimelineItem;
 import com.hyj.hotelbackend.dto.RoomTimelineBooking;
@@ -31,6 +32,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -317,15 +319,14 @@ public class RoomController {
 
         final Map<Long, List<Booking>> bookingsByRoom;
         if (!roomIds.isEmpty()) {
-            List<Booking> bookings = bookingService.lambdaQuery()
-                    .in(Booking::getRoomId, roomIds)
-                    .lt(Booking::getStartTime, windowEnd)
-                    .gt(Booking::getEndTime, windowStart)
-                    .orderByAsc(Booking::getRoomId)
-                    .orderByAsc(Booking::getStartTime)
-                    .orderByAsc(Booking::getId)
-                    .list();
-            bookingsByRoom = bookings.stream().collect(Collectors.groupingBy(Booking::getRoomId));
+            // 复用 BookingService 抽象方法；null 表示不过滤状态（管理员视图展示全部）
+            List<Booking> bookings = bookingService.getBookingPeriodsByRooms(
+                    roomIds, windowStart, windowEnd, null);
+            bookingsByRoom = bookings.stream()
+                    .sorted(Comparator.comparing(Booking::getRoomId)
+                            .thenComparing(Booking::getStartTime)
+                            .thenComparing(Booking::getId))
+                    .collect(Collectors.groupingBy(Booking::getRoomId));
         } else {
             bookingsByRoom = Collections.emptyMap();
         }
@@ -362,6 +363,58 @@ public class RoomController {
 
         resp.setItems(items);
         return resp;
+    }
+
+    /**
+     * 公开接口：查询指定房型某日的预订时段，供前端渲染可用性预览条。
+     * 无需登录即可访问（AuthInterceptor 对 GET /api/rooms/** 已放行并可选附加用户上下文）。
+     * 仅返回 startTime / endTime，不包含任何客户敏感信息。
+     *
+     * @param roomTypeId 房型 ID
+     * @param date       查询日期（默认今天）
+     * @param hotelId    可选的酒店 ID 过滤
+     */
+    @GetMapping("/{roomTypeId}/day-availability")
+    public RoomDayAvailabilityResponse dayAvailability(
+            @PathVariable Long roomTypeId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) Long hotelId) {
+
+        Room roomType = roomService.getById(roomTypeId);
+        if (roomType == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在");
+        }
+        Long resolvedHotelId = hotelId != null ? hotelId : roomType.getHotelId();
+        LocalDate resolvedDate = date != null ? date : LocalDate.now();
+        LocalDateTime windowStart = resolvedDate.atStartOfDay();
+        LocalDateTime windowEnd = windowStart.plusDays(1);
+
+        LambdaQueryWrapper<RoomInstance> roomQuery = new LambdaQueryWrapper<>();
+        roomQuery.eq(RoomInstance::getRoomTypeId, roomTypeId);
+        if (resolvedHotelId != null) {
+            roomQuery.eq(RoomInstance::getHotelId, resolvedHotelId);
+        }
+        List<RoomInstance> instances = roomInstanceService.list(roomQuery);
+
+        List<Long> roomInstanceIds = instances.stream()
+                .map(RoomInstance::getId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        // 只统计已确认或已入住的预订，PENDING/CANCELLED 等不计入占用
+        List<Booking> bookings = bookingService.getBookingPeriodsByRooms(
+                roomInstanceIds, windowStart, windowEnd,
+                Arrays.asList("CONFIRMED", "CHECKED_IN"));
+
+        RoomDayAvailabilityResponse response = new RoomDayAvailabilityResponse();
+        response.setRoomTypeId(roomTypeId);
+        response.setDate(resolvedDate);
+        response.setTotalRooms(instances.size());
+        response.setPeriods(bookings.stream()
+                .map(b -> new RoomDayAvailabilityResponse.Period(b.getStartTime(), b.getEndTime()))
+                .collect(Collectors.toList()));
+
+        return response;
     }
 
     // admin endpoint to update available count
